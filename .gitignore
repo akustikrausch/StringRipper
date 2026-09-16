@@ -1,0 +1,8 @@
+# build artifacts
+/build/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+# keep the shipped bin/URLRipper.exe (added explicitly)
