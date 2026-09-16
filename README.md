@@ -1,6 +1,6 @@
 # StringRipper
 
-Small Windows tool for ripping strings out of running processes, files or whole folders. Mostly built because I needed it myself :)
+Small Windows tool for ripping strings out of running processes, files or whole folders. 
 
 Give it a process and it digs through readable memory looking for URLs or whatever regex you throw at it. Works with ASCII/ANSI/UTF-8, UTF-16 LE/BE and also unwraps one layer of Base64 or hex along the way.
 
