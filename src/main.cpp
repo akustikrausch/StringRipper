@@ -274,21 +274,14 @@ bool isChecked(HWND h) { return SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKE
 
 void showAbout() {
     std::string s;
-    s += "StringRipper " STRINGRIPPER_VERSION "\r\n";
-    s += "by Akustikrausch\r\n";
-    s += "Build " UR_STR(STRINGRIPPER_BUILD) ", built " __DATE__ " " __TIME__ "\r\n\r\n";
-    s += "Extracts URLs and regex matches from running processes and files.\r\n\r\n";
-    s += "Technical\r\n";
-    s += "  Windows x64, C++20, native Win32 GUI (no UI framework).\r\n";
-    s += "  Single portable exe, static C runtime, no DLLs to ship.\r\n";
-    s += "  Multi-threaded scan: one reader thread feeds a worker pool of (cores - 2).\r\n";
-    s += "  URL matching is hand-rolled (no regex); regex mode uses std::regex.\r\n";
-    s += "  Decodes ASCII/ANSI/UTF-8, UTF-16 LE/BE, Base64 and Hex.\r\n";
-    s += "  Process memory is read through FXChainPlayer's ripper backend.\r\n\r\n";
-    s += "Open source\r\n";
-    s += "  No third-party open-source components are bundled.\r\n";
-    s += "  Built on the Windows API and the C++ standard library only.\r\n";
-    s += "  The process reader is reused from Akustikrausch's FXChainPlayer.\r\n";
+    s += "StringRipper " STRINGRIPPER_VERSION "  by Akustikrausch\r\n";
+    s += "build " UR_STR(STRINGRIPPER_BUILD) "  " __DATE__ "\r\n\r\n";
+    s += "URLs and regex out of a process or files.\r\n";
+    s += "Win32, C++20, static CRT, one exe, no DLLs.\r\n";
+    s += "Scan on cores-2. URL match hand-rolled, regex via std::regex.\r\n";
+    s += "ASCII/ANSI/UTF-8, UTF-16, Base64, Hex.\r\n";
+    s += "Reader from Akustikrausch's FXChainPlayer.\r\n";
+    s += "No third-party open source. Windows API + C++ stdlib only.\r\n";
     MessageBoxW(g_main, widen(s).c_str(), L"About StringRipper", MB_OK | MB_ICONINFORMATION);
 }
 

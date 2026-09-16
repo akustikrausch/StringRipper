@@ -26,7 +26,7 @@ $out = Join-Path $root "bin\StringRipper.exe"
 $tmp = $env:TEMP
 $build = Get-Date -Format "yyyyMMddHHmm"   # build number = build timestamp
 
-$cl = "cl /nologo /std:c++20 /EHsc /O2 /Gy /MT /W3 /DUNICODE /D_UNICODE /DSTRINGRIPPER_BUILD=$build /I `"$fxsrc`" `"$src`" `"$rb`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF"
+$cl = "cl /nologo /std:c++20 /EHsc /O2 /Gy /GL /MT /W3 /DUNICODE /D_UNICODE /DSTRINGRIPPER_BUILD=$build /I `"$fxsrc`" `"$src`" `"$rb`" /Fe:`"$out`" /link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF"
 # cd into a local temp dir so object files do not need a UNC-unfriendly /Fo.
 cmd /c "call `"$vcvars`" >nul 2>&1 && cd /d `"$tmp`" && $cl"
 if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }

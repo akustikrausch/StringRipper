@@ -24,9 +24,14 @@ The C/C++ reads like a veteran demoscene coder wrote it. Non-negotiable.
 - Minimal file count. Add to an existing file before making a new one.
 - No abstraction for its own sake. Three plain lines beat a premature helper.
 
+## Commits
+- Terse, lowercase, one line. No body, no ticket refs, no tool credits.
+  `lto, terse about` not a paragraph.
+
 ## Size and build
 - No crinkler, no 32 KB target: this is a native Win32 tool, not an intro. It
   keeps the static C runtime because it uses `<regex>`, `<thread>`,
   `<filesystem>`.
-- Still lean: `/O2 /Gy`, link `/OPT:REF /OPT:ICF`, one exe, no DLLs.
+- Still lean: LTO on (`/GL /LTCG`), `/O2 /Gy`, link `/OPT:REF /OPT:ICF`, one exe,
+  no DLLs.
 - The reader is compiled from FXChainPlayer, not vendored (see README).

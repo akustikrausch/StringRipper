@@ -1,98 +1,52 @@
 # StringRipper
 
-Portable Windows tool that pulls **URLs** (and, in regex mode, arbitrary
-patterns) out of a **running process** or out of **files and folders**. It
-decodes several encodings on the way, de-duplicates the hits, groups them and
-sorts them Z to A.
+Pulls URLs and regex matches out of a running process or out of files and
+folders. Windows only. One portable, unsigned exe, no DLLs, no installer.
 
-Useful for:
+Rips through ASCII/ANSI/UTF-8, UTF-16 (LE/BE) and one level of Base64 and Hex,
+de-dups, groups (by domain or pattern), sorts Z to A.
 
-- checking which servers an app talks to (spotting software that phones home),
-- finding extra in-app download links or stream URLs,
-- a general pattern sweep (emails, IPs, GUIDs, API-key shapes, file paths, or
-  your own regex).
+- URL mode: `scheme://host` for http, https, ftp(s), ws(s), rtsp, rtmp, mms, udp.
+  The host must be real (domain + TLD, dotted IPv4, or localhost), so
+  `://`-shaped junk is dropped.
+- Regex mode: presets (email, IPv4, IPv6, GUID, API key, file path) plus a custom
+  ECMAScript pattern.
 
-It is a **single portable .exe**. No installer, no dependencies, no DLLs to ship
-next to it (the C runtime is linked statically). Windows only.
+Findings are plain text: no click-to-open. Save as TXT and Send to editor write
+the file straight to disk, never through the clipboard, so a background download
+manager cannot grab the links. Only Copy selected uses the clipboard. It reads
+readable memory of processes the current user may open; it never writes to
+another process, injects, or touches the OS security core.
 
-## Why it is its own tool
+Export is the window's grouped view minus the encoding/source columns: a
+`domain (count)` line, its URLs flush-left beneath, one per line.
 
-This started as a feature idea for [FXChainPlayer](https://akustikrausch.itch.io/fxchainplayer)
-and was deliberately kept **out** of it. A music player that reads other
-processes' memory looking for URLs and key-shaped strings is exactly the kind of
-behaviour endpoint security flags, and FXChainPlayer's signing reputation should
-not carry that weight. StringRipper is therefore a separate, standalone, **unsigned**
-program. Expect SmartScreen or an antivirus to warn about an unsigned tool that
-reads process memory; that is the nature of this class of tool.
+## Reader from FXChainPlayer
 
-## What it detects
-
-- **Encodings:** printable ASCII / ANSI / UTF-8, UTF-16 (LE and BE), plus one
-  level of **Base64** and **Hex** decoding (an embedded run is decoded and
-  re-scanned, and the finding is labelled with the encoding it was hidden
-  behind).
-- **URL mode:** `scheme://host/...` for http, https, ftp(s), ws(s), rtsp, rtmp,
-  mms, udp. Grouped by domain. The host must be real (a domain with a TLD, a
-  dotted IPv4, or localhost), so `://`-shaped byte runs are skipped. Optional
-  scheme filter.
-- **Regex mode:** built-in presets (email, IPv4, IPv6, GUID, API key, file path)
-  and a custom ECMAScript pattern. Grouped by pattern.
-
-Export (Save as TXT / Send to editor) is the grouped list from the window
-without the encoding and source columns: a `domain (count)` line, its values
-flush-left beneath it, one per line, for easy mass copy.
-
-## Safety by design
-
-- Findings are shown as **plain selectable text**. There is **no click-to-open**:
-  the tool never opens a URL in a browser.
-- **Save as TXT** and **Send to editor** write the file **directly** and **never
-  use the clipboard**, so a background download manager (JDownloader and the
-  like) cannot pick the links out of the clipboard.
-- Only the explicit **Copy selected** button puts anything on the clipboard.
-- It never writes to another process, injects code, or opens the OS security
-  core; it only reads readable memory of processes the current user may open.
-
-## Reader reused from FXChainPlayer
-
-Reading a process is done with **FXChainPlayer's own ripper backend**
-(`src/audio/rip_backend_win32.cpp` plus its headers): the hardened region walk,
-integrity/elevation handling, image classification and UAC relaunch. StringRipper
-does not reimplement any of that. It compiles that one file from a FXChainPlayer
-checkout and reads memory through its `IMemoryReader` seam; the URL/regex
-detection and the multi-threaded scan are StringRipper's own.
-
-## Performance
-
-The scan is multi-threaded (one reader thread feeding a worker pool of
-`cores - 2`). On a 32-core machine over a 256 MB file: URL mode ~277 MB/s, regex
-mode ~37 MB/s (std::regex is the limit there; URL mode uses a hand-rolled
-scanner, no regex). Process reads stay single-threaded because a process handle
-has one reader, exactly as in FXChainPlayer.
+Process reading is FXChainPlayer's ripper backend
+(`src/audio/rip_backend_win32.cpp` via the `IMemoryReader` seam): region walk,
+integrity, image classification, UAC relaunch. It is compiled from a
+FXChainPlayer checkout, not vendored. StringRipper's own code is the scan (a
+worker pool of `cores - 2`, `scan_driver.hpp`) and the detector (`scan_core.hpp`,
+hand-rolled URL scan, `std::regex` only for patterns). ~277 MB/s URL, ~37 MB/s
+regex on 32 cores.
 
 ## Build
 
-Needs the MSVC C++ build tools (Visual Studio 2022 or the standalone Build
-Tools) **and a FXChainPlayer source checkout** (for the reused ripper backend).
-Point `FXCHAINPLAYER_DIR` at it; it defaults to the sibling folder `..\VST-Player`.
-From the repo root:
+MSVC C++ build tools and a FXChainPlayer checkout. `FXCHAINPLAYER_DIR` points at
+it, default `..\VST-Player`.
 
 ```
 pwsh -File build.ps1
 ```
 
-The result is `bin\StringRipper.exe` (static CRT, `/MT`, no runtime DLLs). A prebuilt
-copy lives in `bin\` in this repo. There is also a CMake build
-(`cmake -DFXCHAINPLAYER_DIR=<checkout>`) that produces the same exe and registers
-the self-tests.
+`bin\StringRipper.exe`, static CRT, LTO. A prebuilt copy is in `bin\`. CMake
+also works: `cmake -DFXCHAINPLAYER_DIR=<checkout>`.
 
 ## Usage
 
-Run `StringRipper.exe` with no arguments for the window. Pick a process (or a file),
-choose URL or Regex mode, tick the encodings, press **Scan**.
-
-Command line (results are printed as text, or written with `--out`; nothing is
-opened):
+Run with no arguments for the window: filter/pick a process (or a file), URL or
+Regex, tick encodings, Scan. Command line:
 
 ```
 StringRipper.exe --pid 4821
@@ -101,19 +55,15 @@ StringRipper.exe --folder .\dump --regex "\bAKIA[0-9A-Z]{16}\b" --out keys.txt
 StringRipper.exe --help
 ```
 
-Scanning some processes (higher-integrity ones) needs an elevated instance.
+Higher-integrity processes need an elevated instance.
 
 ## Layout
 
-- `src/scan_core.hpp` - portable detector (encodings, fast URL scan, regex,
-  de-dup, grouping, sorting). Thread-safe: each worker scans into its own `Sink`.
-  No platform headers, unit-testable anywhere.
-- `src/scan_driver.hpp` - multi-threaded scan: a worker pool that walks
-  FXChainPlayer's `IMemoryReader` (processes) or file chunks.
+- `src/scan_core.hpp` - detector, platform-free, self-tested.
+- `src/scan_driver.hpp` - the worker pool over `IMemoryReader` and files.
 - `src/file_read.hpp` - folder expansion.
-- `src/main.cpp` - Win32 GUI and the command-line mode; process list and reads
-  via `fxchain::ripBackend()`.
-- `tests/test_scan.cpp` - portable core self-test (`ctest` or build directly).
-- `tests/test_driver.cpp` - drives the scan pool over a mock `IMemoryReader`.
+- `src/main.cpp` - Win32 GUI and CLI.
+- `tests/` - core and driver self-tests.
+- `CODE_STYLE.md` - how the native code is written.
 
-Author: Andreas Wendorf (Akustikrausch).
+Akustikrausch.
