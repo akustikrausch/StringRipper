@@ -47,18 +47,38 @@ reads process memory; that is the nature of this class of tool.
 - It never writes to another process, injects code, or opens the OS security
   core; it only reads readable memory of processes the current user may open.
 
+## Reader reused from FXChainPlayer
+
+Reading a process is done with **FXChainPlayer's own ripper backend**
+(`src/audio/rip_backend_win32.cpp` plus its headers): the hardened region walk,
+integrity/elevation handling, image classification and UAC relaunch. URLRipper
+does not reimplement any of that. It compiles that one file from a FXChainPlayer
+checkout and reads memory through its `IMemoryReader` seam; the URL/regex
+detection and the multi-threaded scan are URLRipper's own.
+
+## Performance
+
+The scan is multi-threaded (one reader thread feeding a worker pool of
+`cores - 2`). On a 32-core machine over a 256 MB file: URL mode ~277 MB/s, regex
+mode ~37 MB/s (std::regex is the limit there; URL mode uses a hand-rolled
+scanner, no regex). Process reads stay single-threaded because a process handle
+has one reader, exactly as in FXChainPlayer.
+
 ## Build
 
 Needs the MSVC C++ build tools (Visual Studio 2022 or the standalone Build
-Tools). From the repo root:
+Tools) **and a FXChainPlayer source checkout** (for the reused ripper backend).
+Point `FXCHAINPLAYER_DIR` at it; it defaults to the sibling folder `..\VST-Player`.
+From the repo root:
 
 ```
 pwsh -File build.ps1
 ```
 
-The result is `bin\URLRipper.exe` (static CRT, `/MT`). A prebuilt copy lives in
-`bin\` in this repo. There is also a CMake build (`CMakeLists.txt`) that produces
-the same exe and registers the portable-core self-test.
+The result is `bin\URLRipper.exe` (static CRT, `/MT`, no runtime DLLs). A prebuilt
+copy lives in `bin\` in this repo. There is also a CMake build
+(`cmake -DFXCHAINPLAYER_DIR=<checkout>`) that produces the same exe and registers
+the self-tests.
 
 ## Usage
 
@@ -79,11 +99,15 @@ Scanning some processes (higher-integrity ones) needs an elevated instance.
 
 ## Layout
 
-- `src/scan_core.hpp` - portable detector (encodings, URL/regex matching,
-  de-dup, grouping, sorting). No platform headers, unit-testable anywhere.
-- `src/win_process.hpp` - Win32 process enumeration and memory reading.
-- `src/file_read.hpp` - file and folder reading.
-- `src/main.cpp` - Win32 GUI and the command-line mode.
-- `tests/test_scan.cpp` - self-test for the core (`ctest` or build directly).
+- `src/scan_core.hpp` - portable detector (encodings, fast URL scan, regex,
+  de-dup, grouping, sorting). Thread-safe: each worker scans into its own `Sink`.
+  No platform headers, unit-testable anywhere.
+- `src/scan_driver.hpp` - multi-threaded scan: a worker pool that walks
+  FXChainPlayer's `IMemoryReader` (processes) or file chunks.
+- `src/file_read.hpp` - folder expansion.
+- `src/main.cpp` - Win32 GUI and the command-line mode; process list and reads
+  via `fxchain::ripBackend()`.
+- `tests/test_scan.cpp` - portable core self-test (`ctest` or build directly).
+- `tests/test_driver.cpp` - drives the scan pool over a mock `IMemoryReader`.
 
 Author: Andreas Wendorf (Akustikrausch).

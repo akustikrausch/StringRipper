@@ -35,10 +35,21 @@ static void appendUtf16le(std::vector<uint8_t>& b, const std::string& s) {
 }
 
 static bool hasGroup(const std::vector<ur::Group>& g, const std::string& name) {
-    for (auto& x : g) if (x.name == name) return true; return false;
+    for (auto& x : g) { if (x.name == name) return true; }
+    return false;
 }
 static bool hasValue(const std::vector<ur::Group>& g, const std::string& v) {
-    for (auto& x : g) for (auto& f : x.items) if (f.value == v) return true; return false;
+    for (auto& x : g) { for (auto& f : x.items) { if (f.value == v) return true; } }
+    return false;
+}
+// Run the detector over a buffer and return merged groups.
+static std::vector<ur::Group> run(const ur::Options& o, const std::vector<uint8_t>& buf) {
+    ur::Detector det(o);
+    ur::Sink sink;
+    det.scan(buf.data(), buf.size(), "test", sink);
+    std::vector<ur::Sink> sinks;
+    sinks.push_back(std::move(sink));
+    return ur::mergeSinks(sinks);
 }
 
 int main() {
@@ -53,9 +64,7 @@ int main() {
     // URL mode
     {
         ur::Options o; o.mode = ur::Mode::Urls;
-        ur::Scanner sc(o);
-        sc.feed(buf.data(), buf.size(), "test");
-        auto g = sc.finalize();
+        auto g = run(o, buf);
         CHECK(hasGroup(g, "api.example.com"), "url ascii domain");
         CHECK(hasGroup(g, "wide.example.org"), "url utf-16 domain");
         CHECK(hasGroup(g, "b64.example.net"), "url base64 domain");
@@ -72,9 +81,7 @@ int main() {
     // Regex mode: email + AWS key
     {
         ur::Options o; o.mode = ur::Mode::Regex; o.presets = {"email", "apikey"};
-        ur::Scanner sc(o);
-        sc.feed(buf.data(), buf.size(), "test");
-        auto g = sc.finalize();
+        auto g = run(o, buf);
         CHECK(hasValue(g, "telemetry@mail.example.com"), "regex email match");
         CHECK(hasValue(g, "AKIA1234567890ABCDEF"), "regex aws key match");
     }
@@ -84,17 +91,30 @@ int main() {
         std::vector<uint8_t> two;
         appendAscii(two, "https://dup.example.com/x");
         appendAscii(two, "https://dup.example.com/x");
-        ur::Options o; ur::Scanner sc(o);
-        sc.feed(two.data(), two.size(), "test");
-        auto g = sc.finalize();
+        ur::Options o;
+        auto g = run(o, two);
         std::size_t n = 0; for (auto& x : g) n += x.items.size();
         CHECK(n == 1, "duplicate url collapsed to one");
+    }
+
+    // Merge across two sinks de-dups globally
+    {
+        std::vector<uint8_t> one;
+        appendAscii(one, "https://merge.example.com/a");
+        ur::Options o;
+        ur::Detector det(o);
+        ur::Sink s1, s2;
+        det.scan(one.data(), one.size(), "t1", s1);
+        det.scan(one.data(), one.size(), "t2", s2);
+        std::vector<ur::Sink> sinks; sinks.push_back(std::move(s1)); sinks.push_back(std::move(s2));
+        auto g = ur::mergeSinks(sinks);
+        CHECK(ur::countFindings(g) == 1, "cross-sink duplicate collapsed to one");
     }
 
     // Bad custom regex -> throws
     {
         bool threw = false;
-        try { ur::Options o; o.mode = ur::Mode::Regex; o.customRegex = "("; ur::Scanner sc(o); }
+        try { ur::Options o; o.mode = ur::Mode::Regex; o.customRegex = "("; ur::Detector det(o); }
         catch (const ur::RegexError&) { threw = true; }
         CHECK(threw, "invalid custom regex rejected");
     }
