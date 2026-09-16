@@ -1,69 +1,86 @@
 # StringRipper
 
-Pulls URLs and regex matches out of a running process or out of files and
-folders. Windows only. One portable, unsigned exe, no DLLs, no installer.
+Small Windows tool for ripping strings out of running processes, files or whole folders. Mostly built because I needed it myself :)
 
-Rips through ASCII/ANSI/UTF-8, UTF-16 (LE/BE) and one level of Base64 and Hex,
-de-dups, groups (by domain or pattern), sorts Z to A.
+Give it a process and it digs through readable memory looking for URLs or whatever regex you throw at it. Works with ASCII/ANSI/UTF-8, UTF-16 LE/BE and also unwraps one layer of Base64 or hex along the way.
 
-- URL mode: `scheme://host` for http, https, ftp(s), ws(s), rtsp, rtmp, mms, udp.
-  The host must be real (domain + TLD, dotted IPv4, or localhost), so
-  `://`-shaped junk is dropped.
-- Regex mode: presets (email, IPv4, IPv6, GUID, API key, file path) plus a custom
-  ECMAScript pattern.
+One portable exe. No installer, no DLL mess. It's unsigned for now.
 
-Findings are plain text: no click-to-open. Save as TXT and Send to editor write
-the file straight to disk, never through the clipboard, so a background download
-manager cannot grab the links. Only Copy selected uses the clipboard. It reads
-readable memory of processes the current user may open; it never writes to
-another process, injects, or touches the OS security core.
+It de-dups the results, can group them by domain/pattern and sort Z-A.
 
-Export is the window's grouped view minus the encoding/source columns: a
-`domain (count)` line, its URLs flush-left beneath, one per line.
+URL mode knows http/https, ftp, ws, rtsp, rtmp, mms, udp etc. I made the URL detector a bit picky on purpose. The host has to look real, so random memory garbage containing `://` doesn't flood the results.
 
-## Reader from FXChainPlayer
+Regex mode has a few presets for the usual stuff: email, IPv4/IPv6, GUIDs, API keys, file paths... or give it your own ECMAScript regex.
 
-Process reading is FXChainPlayer's ripper backend
-(`src/audio/rip_backend_win32.cpp` via the `IMemoryReader` seam): region walk,
-integrity, image classification, UAC relaunch. It is compiled from a
-FXChainPlayer checkout, not vendored. StringRipper's own code is the scan (a
-worker pool of `cores - 2`, `scan_driver.hpp`) and the detector (`scan_core.hpp`,
-hand-rolled URL scan, `std::regex` only for patterns). ~277 MB/s URL, ~37 MB/s
-regex on 32 cores.
+Findings stay plain text. No clickable URLs. `Save as TXT` and `Send to editor` write straight to disk and never touch the clipboard. This is intentional... some download managers love watching the clipboard and immediately grabbing every URL they see. `Copy selected` is the only thing that puts anything there.
+
+It only reads memory the current user is allowed to open. No injection, no writing into other processes, no messing around with the Windows security stuff.
+
+Export looks basically like this:
+
+```text
+example.com (3)
+https://example.com/foo
+https://example.com/bar
+https://example.com/baz
+```
+
+## Some FXChainPlayer DNA inside
+
+The process reader comes from the ripper backend I originally wrote for FXChainPlayer (`src/audio/rip_backend_win32.cpp` through `IMemoryReader`). That part does the memory region walking, integrity handling, image classification and UAC relaunch.
+
+It gets compiled from an FXChainPlayer checkout, it's not copied into this repo.
+
+The actual StringRipper side is pretty small: `scan_driver.hpp` throws the work over a pool of `cores - 2`, and `scan_core.hpp` does the detection. URLs use my own scanner, `std::regex` is only used for regex patterns.
+
+On my 32 core machine I currently get around 277 MB/s scanning URLs and ~37 MB/s with regex. Good enough for ripping through some rather stupidly large processes :)
 
 ## Build
 
-MSVC C++ build tools and a FXChainPlayer checkout. `FXCHAINPLAYER_DIR` points at
-it, default `..\VST-Player`.
+You need MSVC C++ build tools and an FXChainPlayer checkout.
 
-```
+`FXCHAINPLAYER_DIR` points to that checkout. Default is `..\VST-Player`.
+
+```powershell
 pwsh -File build.ps1
 ```
 
-`bin\StringRipper.exe`, static CRT, LTO. A prebuilt copy is in `bin\`. CMake
-also works: `cmake -DFXCHAINPLAYER_DIR=<checkout>`.
+Result:
+
+```text
+bin\StringRipper.exe
+```
+
+Static CRT + LTO. There's also a prebuilt exe in `bin\`.
+
+CMake works too:
+
+```text
+cmake -DFXCHAINPLAYER_DIR=<checkout>
+```
 
 ## Usage
 
-Run with no arguments for the window: filter/pick a process (or a file), URL or
-Regex, tick encodings, Scan. Command line:
+Run it without arguments if you want the GUI. Pick/filter a process or file, choose URL or Regex mode, select the encodings and hit Scan.
 
-```
+CLI works too:
+
+```text
 StringRipper.exe --pid 4821
 StringRipper.exe --file game.exe --preset email,apikey
 StringRipper.exe --folder .\dump --regex "\bAKIA[0-9A-Z]{16}\b" --out keys.txt
 StringRipper.exe --help
 ```
 
-Higher-integrity processes need an elevated instance.
+Reading a higher-integrity process needs an elevated StringRipper. Windows being Windows :)
 
-## Layout
+## Source layout
 
-- `src/scan_core.hpp` - detector, platform-free, self-tested.
-- `src/scan_driver.hpp` - the worker pool over `IMemoryReader` and files.
-- `src/file_read.hpp` - folder expansion.
-- `src/main.cpp` - Win32 GUI and CLI.
-- `tests/` - core and driver self-tests.
-- `CODE_STYLE.md` - how the native code is written.
+- `src/scan_core.hpp` - scanner/detector, no platform stuff, self-tested
+- `src/scan_driver.hpp` - worker pool for memory + files
+- `src/file_read.hpp` - folder crawling
+- `src/main.cpp` - Win32 GUI + CLI
+- `tests/` - core/driver tests
+- `CODE_STYLE.md` - some rules so the native code doesn't turn into complete spaghetti
 
 Akustikrausch.
