@@ -1,4 +1,4 @@
-// test_scan.cpp - portable self-test for the URLRipper detection core.
+// test_scan.cpp - portable self-test for the StringRipper detection core.
 // Build (any platform): c++ -std=c++20 -I../src test_scan.cpp -o test_scan
 #include "../src/scan_core.hpp"
 

@@ -1,4 +1,4 @@
-// URLRipper - portable Windows tool.
+// StringRipper - portable Windows tool.
 //
 // Scans a running process or files/folders for embedded URLs (URL mode) or for
 // regex matches (Regex mode), decoding ASCII/ANSI/UTF-8, UTF-16, Base64 and Hex
@@ -62,11 +62,11 @@
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
-#ifndef URLRIPPER_VERSION
-#define URLRIPPER_VERSION "1.0.0"
+#ifndef STRINGRIPPER_VERSION
+#define STRINGRIPPER_VERSION "1.0.0"
 #endif
-#ifndef URLRIPPER_BUILD
-#define URLRIPPER_BUILD 0
+#ifndef STRINGRIPPER_BUILD
+#define STRINGRIPPER_BUILD 0
 #endif
 #define UR_STR2(x) #x
 #define UR_STR(x) UR_STR2(x)
@@ -93,7 +93,7 @@ static std::wstring widen(const std::string& s) {
 
 static std::string resultsToText(const std::vector<ur::Group>& groups, ur::Mode mode) {
     std::string out;
-    out += (mode == ur::Mode::Urls) ? "# URLRipper - URLs\r\n" : "# URLRipper - matches\r\n";
+    out += (mode == ur::Mode::Urls) ? "# StringRipper - URLs\r\n" : "# StringRipper - matches\r\n";
     out += "# " + std::to_string(ur::countFindings(groups)) + " results in " +
            std::to_string(groups.size()) + " groups, sorted Z to A\r\n\r\n";
     for (const auto& g : groups) {
@@ -191,11 +191,11 @@ static int runCli(int argc, wchar_t** argv) {
 
     if (help || (inputs.empty() && pid == 0)) {
         std::printf(
-            "URLRipper " URLRIPPER_VERSION " - extract URLs or regex matches from processes and files.\n\n"
+            "StringRipper " STRINGRIPPER_VERSION " - extract URLs or regex matches from processes and files.\n\n"
             "Usage:\n"
-            "  URLRipper.exe --pid N            [options]   scan a running process\n"
-            "  URLRipper.exe --file PATH ...    [options]   scan files\n"
-            "  URLRipper.exe --folder PATH ...  [options]   scan a folder (recursive)\n\n"
+            "  StringRipper.exe --pid N            [options]   scan a running process\n"
+            "  StringRipper.exe --file PATH ...    [options]   scan files\n"
+            "  StringRipper.exe --folder PATH ...  [options]   scan a folder (recursive)\n\n"
             "Options:\n"
             "  --regex PAT      regex mode with a custom ECMAScript pattern\n"
             "  --preset IDS     regex mode with presets (email,ipv4,ipv6,guid,apikey,filepath)\n"
@@ -290,9 +290,9 @@ bool isChecked(HWND h) { return SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKE
 
 void showAbout() {
     std::string s;
-    s += "URLRipper " URLRIPPER_VERSION "\r\n";
+    s += "StringRipper " STRINGRIPPER_VERSION "\r\n";
     s += "by Akustikrausch\r\n";
-    s += "Build " UR_STR(URLRIPPER_BUILD) ", built " __DATE__ " " __TIME__ "\r\n\r\n";
+    s += "Build " UR_STR(STRINGRIPPER_BUILD) ", built " __DATE__ " " __TIME__ "\r\n\r\n";
     s += "Extracts URLs and regex matches from running processes and files.\r\n\r\n";
     s += "Technical\r\n";
     s += "  Windows x64, C++20, native Win32 GUI (no UI framework).\r\n";
@@ -305,7 +305,7 @@ void showAbout() {
     s += "  No third-party open-source components are bundled.\r\n";
     s += "  Built on the Windows API and the C++ standard library only.\r\n";
     s += "  The process reader is reused from Akustikrausch's FXChainPlayer.\r\n";
-    MessageBoxW(g_main, widen(s).c_str(), L"About URLRipper", MB_OK | MB_ICONINFORMATION);
+    MessageBoxW(g_main, widen(s).c_str(), L"About StringRipper", MB_OK | MB_ICONINFORMATION);
 }
 
 void fillCombo() {
@@ -449,11 +449,11 @@ void onDone(std::vector<ur::Group>* groups) {
     enableResultActions(!g_lastResults.empty());
     if (g_scanDenied) {
         if (g_scanNeedsElev && g_scanPid) {
-            if (MessageBoxW(g_main, L"This process runs with higher rights. Relaunch URLRipper as administrator to scan it?",
-                            L"URLRipper", MB_YESNO | MB_ICONQUESTION) == IDYES)
+            if (MessageBoxW(g_main, L"This process runs with higher rights. Relaunch StringRipper as administrator to scan it?",
+                            L"StringRipper", MB_YESNO | MB_ICONQUESTION) == IDYES)
                 fxchain::ripBackend().requestElevation(g_scanPid);
         } else {
-            MessageBoxW(g_main, L"Could not open that process for reading.", L"URLRipper", MB_ICONWARNING);
+            MessageBoxW(g_main, L"Could not open that process for reading.", L"StringRipper", MB_ICONWARNING);
         }
     }
 }
@@ -482,7 +482,7 @@ void doScan() {
         if (sel >= 0 && sel < (int)g_procsView.size()) pid = g_procsView[sel].pid;
     }
     if (!pid && file.empty()) {
-        MessageBoxW(g_main, L"Choose a process or a file first.", L"URLRipper", MB_ICONINFORMATION);
+        MessageBoxW(g_main, L"Choose a process or a file first.", L"StringRipper", MB_ICONINFORMATION);
         return;
     }
 
@@ -543,7 +543,7 @@ void saveAsTxt() {
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER;
     if (::GetSaveFileNameW(&ofn)) {
         if (!writeTextFile(buf, resultsToText(g_lastResults, g_lastMode)))
-            MessageBoxW(g_main, L"Could not write the file.", L"URLRipper", MB_ICONERROR);
+            MessageBoxW(g_main, L"Could not write the file.", L"StringRipper", MB_ICONERROR);
     }
 }
 
@@ -551,9 +551,9 @@ void sendToEditor() {
     if (g_lastResults.empty()) return;
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
-    std::wstring p = std::wstring(tmp) + L"URLRipper-" + std::to_wstring(GetTickCount64()) + L".txt";
+    std::wstring p = std::wstring(tmp) + L"StringRipper-" + std::to_wstring(GetTickCount64()) + L".txt";
     if (!writeTextFile(p, resultsToText(g_lastResults, g_lastMode))) {
-        MessageBoxW(g_main, L"Could not write the temp file.", L"URLRipper", MB_ICONERROR);
+        MessageBoxW(g_main, L"Could not write the temp file.", L"StringRipper", MB_ICONERROR);
         return;
     }
     ::ShellExecuteW(g_main, L"open", p.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -810,11 +810,11 @@ int runGui(HINSTANCE hInst) {
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = CreateSolidBrush(kBg);
-    wc.lpszClassName = L"URLRipperWindow";
+    wc.lpszClassName = L"StringRipperWindow";
     wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     RegisterClassExW(&wc);
 
-    g_main = CreateWindowExW(0, wc.lpszClassName, L"URLRipper " URLRIPPER_VERSION L" by Akustikrausch",
+    g_main = CreateWindowExW(0, wc.lpszClassName, L"StringRipper " STRINGRIPPER_VERSION L" by Akustikrausch",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1000, 760,
         nullptr, nullptr, hInst, nullptr);
     if (!g_main) return 1;

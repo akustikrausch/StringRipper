@@ -6,4 +6,4 @@
 *.exp
 *.lib
 *.exe.manifest
-# keep the shipped bin/URLRipper.exe (added explicitly)
+# keep the shipped bin/StringRipper.exe (added explicitly)

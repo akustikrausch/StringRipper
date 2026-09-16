@@ -1,4 +1,4 @@
-# URLRipper
+# StringRipper
 
 Portable Windows tool that pulls **URLs** (and, in regex mode, arbitrary
 patterns) out of a **running process** or out of **files and folders**. It
@@ -21,7 +21,7 @@ This started as a feature idea for [FXChainPlayer](https://akustikrausch.itch.io
 and was deliberately kept **out** of it. A music player that reads other
 processes' memory looking for URLs and key-shaped strings is exactly the kind of
 behaviour endpoint security flags, and FXChainPlayer's signing reputation should
-not carry that weight. URLRipper is therefore a separate, standalone, **unsigned**
+not carry that weight. StringRipper is therefore a separate, standalone, **unsigned**
 program. Expect SmartScreen or an antivirus to warn about an unsigned tool that
 reads process memory; that is the nature of this class of tool.
 
@@ -51,10 +51,10 @@ reads process memory; that is the nature of this class of tool.
 
 Reading a process is done with **FXChainPlayer's own ripper backend**
 (`src/audio/rip_backend_win32.cpp` plus its headers): the hardened region walk,
-integrity/elevation handling, image classification and UAC relaunch. URLRipper
+integrity/elevation handling, image classification and UAC relaunch. StringRipper
 does not reimplement any of that. It compiles that one file from a FXChainPlayer
 checkout and reads memory through its `IMemoryReader` seam; the URL/regex
-detection and the multi-threaded scan are URLRipper's own.
+detection and the multi-threaded scan are StringRipper's own.
 
 ## Performance
 
@@ -75,24 +75,24 @@ From the repo root:
 pwsh -File build.ps1
 ```
 
-The result is `bin\URLRipper.exe` (static CRT, `/MT`, no runtime DLLs). A prebuilt
+The result is `bin\StringRipper.exe` (static CRT, `/MT`, no runtime DLLs). A prebuilt
 copy lives in `bin\` in this repo. There is also a CMake build
 (`cmake -DFXCHAINPLAYER_DIR=<checkout>`) that produces the same exe and registers
 the self-tests.
 
 ## Usage
 
-Run `URLRipper.exe` with no arguments for the window. Pick a process (or a file),
+Run `StringRipper.exe` with no arguments for the window. Pick a process (or a file),
 choose URL or Regex mode, tick the encodings, press **Scan**.
 
 Command line (results are printed as text, or written with `--out`; nothing is
 opened):
 
 ```
-URLRipper.exe --pid 4821
-URLRipper.exe --file game.exe --preset email,apikey
-URLRipper.exe --folder .\dump --regex "\bAKIA[0-9A-Z]{16}\b" --out keys.txt
-URLRipper.exe --help
+StringRipper.exe --pid 4821
+StringRipper.exe --file game.exe --preset email,apikey
+StringRipper.exe --folder .\dump --regex "\bAKIA[0-9A-Z]{16}\b" --out keys.txt
+StringRipper.exe --help
 ```
 
 Scanning some processes (higher-integrity ones) needs an elevated instance.

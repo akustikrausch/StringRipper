@@ -1,4 +1,4 @@
-// file_read.hpp - portable file and folder reading for URLRipper.
+// file_read.hpp - portable file and folder reading for StringRipper.
 #pragma once
 
 #include <cstdint>

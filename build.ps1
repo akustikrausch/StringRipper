@@ -1,6 +1,6 @@
-# build.ps1 - build the portable URLRipper.exe with MSVC (static CRT, no DLLs).
+# build.ps1 - build the portable StringRipper.exe with MSVC (static CRT, no DLLs).
 #
-# URLRipper reuses FXChainPlayer's ripper reader (src/audio/rip_backend_win32.cpp
+# StringRipper reuses FXChainPlayer's ripper reader (src/audio/rip_backend_win32.cpp
 # + headers). Point FXCHAINPLAYER_DIR at your FXChainPlayer checkout; it defaults
 # to the sibling folder ..\VST-Player.
 #
@@ -22,11 +22,11 @@ if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found. Install the MSVC 
 
 New-Item -ItemType Directory -Force -Path (Join-Path $root "bin") | Out-Null
 $src = Join-Path $root "src\main.cpp"
-$out = Join-Path $root "bin\URLRipper.exe"
+$out = Join-Path $root "bin\StringRipper.exe"
 $tmp = $env:TEMP
 $build = Get-Date -Format "yyyyMMddHHmm"   # build number = build timestamp
 
-$cl = "cl /nologo /std:c++20 /EHsc /O2 /MT /W3 /DUNICODE /D_UNICODE /DURLRIPPER_BUILD=$build /I `"$fxsrc`" `"$src`" `"$rb`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS"
+$cl = "cl /nologo /std:c++20 /EHsc /O2 /MT /W3 /DUNICODE /D_UNICODE /DSTRINGRIPPER_BUILD=$build /I `"$fxsrc`" `"$src`" `"$rb`" /Fe:`"$out`" /link /SUBSYSTEM:WINDOWS"
 # cd into a local temp dir so object files do not need a UNC-unfriendly /Fo.
 cmd /c "call `"$vcvars`" >nul 2>&1 && cd /d `"$tmp`" && $cl"
 if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }

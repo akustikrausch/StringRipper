@@ -1,4 +1,4 @@
-// scan_core.hpp - portable, thread-safe detection core for URLRipper.
+// scan_core.hpp - portable, thread-safe detection core for StringRipper.
 //
 // No platform headers: compiles anywhere, so the core has a self-test outside
 // Windows. It takes a raw byte buffer (a window of process memory or a file

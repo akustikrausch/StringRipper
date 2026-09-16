@@ -1,4 +1,4 @@
-// scan_driver.hpp - multi-threaded scan orchestration for URLRipper.
+// scan_driver.hpp - multi-threaded scan orchestration for StringRipper.
 //
 // Reading a process is done through FXChainPlayer's IMemoryReader (its hardened
 // Win32 backend: region walk, integrity handling, image classification). This
