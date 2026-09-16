@@ -257,7 +257,7 @@ HWND g_secFind, g_modeUrl, g_modeRegex, g_urlHint;
 HWND g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel, g_custom;
 HWND g_secDecode, g_ascii, g_utf16, g_b64, g_hex;
 HWND g_scan, g_cancel, g_status;
-HWND g_secResults, g_results, g_copy, g_save, g_editor, g_about, g_by;
+HWND g_secResults, g_results, g_copy, g_save, g_editor, g_about;
 HFONT g_font = nullptr, g_fontHdr = nullptr;
 HBRUSH g_bgBrush = nullptr, g_bg2Brush = nullptr;
 
@@ -273,6 +273,9 @@ uint32_t g_autoRipPid = 0;
 uint32_t g_scanPid = 0;
 bool g_scanDenied = false;
 bool g_scanNeedsElev = false;
+
+void layout(int cw, int ch);
+void relayout(HWND hwnd);
 
 HWND mkStatic(HWND p, const wchar_t* t, DWORD extra = 0) {
     return CreateWindowExW(0, L"STATIC", t, WS_CHILD | WS_VISIBLE | SS_LEFT | extra,
@@ -459,6 +462,7 @@ void setRegexMode() {
     SendMessageW(g_modeUrl, BM_SETCHECK, BST_UNCHECKED, 0);
     SendMessageW(g_modeRegex, BM_SETCHECK, BST_CHECKED, 0);
     updateModeVisibility();
+    relayout(g_main);
 }
 
 void doScan() {
@@ -556,28 +560,29 @@ void sendToEditor() {
 }
 
 void layout(int cw, int ch) {
-    const int m = 12, rh = 24, gap = 10, hh = 15;
+    const int m = 12, rh = 24, gap = 10, hh = 16, lh = 19;
+    const bool regex = isChecked(g_modeRegex);
     int y = m;
 
     // SOURCE
-    MoveWindow(g_secSource, m, y, 200, hh, TRUE); y += hh + 2;
+    MoveWindow(g_secSource, m, y, 200, hh, TRUE); y += hh + 3;
     MoveWindow(g_search, m, y, cw - m * 2 - 180, rh, TRUE);
     MoveWindow(g_refresh, cw - m - 174, y, 84, rh, TRUE);
     MoveWindow(g_file, cw - m - 84, y, 84, rh, TRUE);
     y += rh + 4;
     MoveWindow(g_source, m, y, cw - m * 2, 360, TRUE);   // 360 = dropdown height
-    y += rh + 2;
-    MoveWindow(g_srcInfo, m, y, cw - m * 2, hh, TRUE);
-    y += hh + gap;
+    y += rh + 3;
+    MoveWindow(g_srcInfo, m, y, cw - m * 2, lh, TRUE);
+    y += lh + gap;
 
     // WHAT TO FIND
-    MoveWindow(g_secFind, m, y, 200, hh, TRUE); y += hh + 2;
+    MoveWindow(g_secFind, m, y, 200, hh, TRUE); y += hh + 3;
     MoveWindow(g_modeUrl, m, y, 66, rh, TRUE);
     MoveWindow(g_modeRegex, m + 70, y, 74, rh, TRUE);
-    y += rh + 2;
-    int detailY = y;
-    MoveWindow(g_urlHint, m, detailY + 3, cw - m * 2, hh, TRUE);
-    MoveWindow(g_presetLabel, m, detailY + 3, 55, hh, TRUE);
+    y += rh + 3;
+    const int detailY = y;
+    MoveWindow(g_urlHint, m, detailY + 3, cw - m * 2, lh, TRUE);
+    MoveWindow(g_presetLabel, m, detailY + 4, 55, lh, TRUE);
     int px = m + 60;
     MoveWindow(g_pEmail, px, detailY, 66, rh, TRUE);
     MoveWindow(g_pIpv4, px + 68, detailY, 58, rh, TRUE);
@@ -585,12 +590,13 @@ void layout(int cw, int ch) {
     MoveWindow(g_pGuid, px + 188, detailY, 62, rh, TRUE);
     MoveWindow(g_pApi, px + 252, detailY, 76, rh, TRUE);
     MoveWindow(g_pPath, px + 330, detailY, 82, rh, TRUE);
-    MoveWindow(g_customLabel, m, detailY + rh + 4 + 3, 55, hh, TRUE);
-    MoveWindow(g_custom, m + 60, detailY + rh + 4, cw - m * 2 - 60, rh, TRUE);
-    y = detailY + rh + 4 + rh + gap;   // reserve both regex rows
+    MoveWindow(g_customLabel, m, detailY + rh + 6 + 4, 55, lh, TRUE);
+    MoveWindow(g_custom, m + 60, detailY + rh + 6, cw - m * 2 - 60, rh, TRUE);
+    // Reserve two rows only in Regex mode; URL mode needs just the hint line.
+    y = regex ? (detailY + rh + 6 + rh + gap) : (detailY + lh + gap);
 
     // DECODE
-    MoveWindow(g_secDecode, m, y, 200, hh, TRUE); y += hh + 2;
+    MoveWindow(g_secDecode, m, y, 200, hh, TRUE); y += hh + 3;
     MoveWindow(g_ascii, m, y, 66, rh, TRUE);
     MoveWindow(g_utf16, m + 70, y, 74, rh, TRUE);
     MoveWindow(g_b64, m + 150, y, 74, rh, TRUE);
@@ -600,13 +606,12 @@ void layout(int cw, int ch) {
     // scan bar
     MoveWindow(g_scan, m, y, 100, rh + 2, TRUE);
     MoveWindow(g_cancel, m + 108, y, 90, rh + 2, TRUE);
-    MoveWindow(g_status, m + 210, y + 4, cw - m * 2 - 210, hh, TRUE);
+    MoveWindow(g_status, m + 210, y + 3, cw - m * 2 - 210, lh, TRUE);
     y += rh + 2 + gap;
 
-    // RESULTS  (header row carries the by-line on the right so nothing clips)
-    MoveWindow(g_secResults, m, y, 200, hh, TRUE);
-    MoveWindow(g_by, cw - m - 200, y, 200, hh, TRUE);
-    y += hh + 2;
+    // RESULTS
+    MoveWindow(g_secResults, m, y, 300, hh, TRUE);
+    y += hh + 3;
     int bottom = ch - m - rh;
     int listH = (bottom - gap) - y;
     if (listH < 60) listH = 60;
@@ -620,6 +625,12 @@ void layout(int cw, int ch) {
     MoveWindow(g_save, m + 128, bottom, 120, rh, TRUE);
     MoveWindow(g_editor, m + 256, bottom, 140, rh, TRUE);
     MoveWindow(g_about, cw - m - 84, bottom, 84, rh, TRUE);
+}
+
+void relayout(HWND hwnd) {
+    RECT rc; GetClientRect(hwnd, &rc);
+    layout(rc.right, rc.bottom);
+    InvalidateRect(hwnd, nullptr, TRUE);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -695,13 +706,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_editor = mkButton(hwnd, L"Send to editor", ID_EDITOR);
         g_about = mkButton(hwnd, L"About", ID_ABOUT);
         enableResultActions(false);
-        g_by = CreateWindowExW(0, L"STATIC", L"by Akustikrausch",
-            WS_CHILD | WS_VISIBLE | SS_RIGHT, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
 
         for (HWND h : {g_search, g_source, g_refresh, g_file, g_srcInfo, g_modeUrl, g_modeRegex, g_urlHint,
                        g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel,
                        g_custom, g_ascii, g_utf16, g_b64, g_hex, g_scan, g_cancel, g_status, g_results,
-                       g_copy, g_save, g_editor, g_about, g_by})
+                       g_copy, g_save, g_editor, g_about})
             setFont(h, g_font);
         for (HWND h : {g_secSource, g_secFind, g_secDecode, g_secResults})
             setFont(h, g_fontHdr);
@@ -731,7 +740,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = (HDC)wp;
         HWND ctl = (HWND)lp;
         SetTextColor(dc, (ctl == g_secSource || ctl == g_secFind || ctl == g_secDecode ||
-                          ctl == g_secResults || ctl == g_srcInfo || ctl == g_urlHint || ctl == g_by)
+                          ctl == g_secResults || ctl == g_srcInfo || ctl == g_urlHint)
                          ? kText3 : kText);
         SetBkColor(dc, kBg);
         return (LRESULT)g_bgBrush;
@@ -759,7 +768,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_SEARCH: if (HIWORD(wp) == EN_CHANGE) applyProcFilter(); break;
         case ID_REFRESH: refreshProcesses(); break;
         case ID_FILE: pickFile(); break;
-        case ID_MODE_URL: case ID_MODE_REGEX: updateModeVisibility(); break;
+        case ID_MODE_URL: case ID_MODE_REGEX: updateModeVisibility(); relayout(hwnd); break;
         case ID_SCAN: doScan(); break;
         case ID_CANCEL: g_cancelFlag = true; SetWindowTextW(g_status, L"Cancelling..."); break;
         case ID_COPY: copySelected(); break;
@@ -805,7 +814,7 @@ int runGui(HINSTANCE hInst) {
     wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     RegisterClassExW(&wc);
 
-    g_main = CreateWindowExW(0, wc.lpszClassName, L"URLRipper " URLRIPPER_VERSION,
+    g_main = CreateWindowExW(0, wc.lpszClassName, L"URLRipper " URLRIPPER_VERSION L" by Akustikrausch",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1000, 760,
         nullptr, nullptr, hInst, nullptr);
     if (!g_main) return 1;
