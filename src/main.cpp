@@ -51,7 +51,7 @@ name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #ifndef STRINGRIPPER_VERSION
-#define STRINGRIPPER_VERSION "1.0.0"
+#define STRINGRIPPER_VERSION "1.0.2"
 #endif
 #ifndef STRINGRIPPER_BUILD
 #define STRINGRIPPER_BUILD 0
@@ -83,7 +83,7 @@ static std::string resultsToText(const std::vector<ur::Group>& groups, ur::Mode)
     std::string out;
     for (const auto& g : groups) {
         if (!out.empty()) out += "\r\n";
-        out += g.name + "  (" + std::to_string(g.items.size()) + ")\r\n";
+        out += g.name + "  (" + std::to_string(g.items.size()) + ")\r\n\r\n";
         for (const auto& f : g.items) out += f.value + "\r\n";
     }
     return out;
