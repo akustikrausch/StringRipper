@@ -5,8 +5,7 @@
 // along the way. Findings are de-duplicated, grouped and sorted Z to A.
 //
 // Reading a process reuses FXChainPlayer's hardened ripper backend
-// (fxchain::ripBackend(): region walk, integrity handling, image classification,
-// UAC relaunch). Scanning runs multi-threaded on top of it.
+// (fxchain::ripBackend()). Scanning runs multi-threaded on top of it.
 //
 // Safety, by design: findings are plain selectable text with NO click-to-open;
 // "Save as TXT" / "Send to editor" write the file directly and NEVER use the
@@ -35,6 +34,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -61,6 +61,15 @@
 #pragma comment(linker, "\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
+#ifndef URLRIPPER_VERSION
+#define URLRIPPER_VERSION "1.0.0"
+#endif
+#ifndef URLRIPPER_BUILD
+#define URLRIPPER_BUILD 0
+#endif
+#define UR_STR2(x) #x
+#define UR_STR(x) UR_STR2(x)
 
 // ---------------------------------------------------------------- utf helpers
 
@@ -115,7 +124,6 @@ static constexpr std::size_t kMaxInFlight = 256u * 1024 * 1024;
 
 // ---------------------------------------------------------------- scan helpers (shared GUI/CLI)
 
-// Scan a process by pid into groups. Sets accessDenied/needsElevation on failure.
 static std::vector<ur::Group> scanProcess(const ur::Detector& det, uint32_t pid,
                                           const std::function<bool()>& cancel,
                                           bool& accessDenied, bool& needsElevation) {
@@ -183,7 +191,7 @@ static int runCli(int argc, wchar_t** argv) {
 
     if (help || (inputs.empty() && pid == 0)) {
         std::printf(
-            "URLRipper - extract URLs or regex matches from processes and files.\n\n"
+            "URLRipper " URLRIPPER_VERSION " - extract URLs or regex matches from processes and files.\n\n"
             "Usage:\n"
             "  URLRipper.exe --pid N            [options]   scan a running process\n"
             "  URLRipper.exe --file PATH ...    [options]   scan files\n"
@@ -231,55 +239,75 @@ static int runCli(int argc, wchar_t** argv) {
 namespace {
 
 enum : int {
-    ID_SOURCE = 1001, ID_REFRESH, ID_FILE, ID_MODE_URL, ID_MODE_REGEX,
+    ID_SEARCH = 1000, ID_SOURCE, ID_REFRESH, ID_FILE, ID_MODE_URL, ID_MODE_REGEX,
     ID_ENC_ASCII, ID_ENC_UTF16, ID_ENC_B64, ID_ENC_HEX,
     ID_P_EMAIL, ID_P_IPV4, ID_P_IPV6, ID_P_GUID, ID_P_APIKEY, ID_P_PATH,
-    ID_CUSTOM, ID_SCAN, ID_CANCEL, ID_RESULTS, ID_COPY, ID_SAVE, ID_EDITOR
+    ID_CUSTOM, ID_SCAN, ID_CANCEL, ID_RESULTS, ID_COPY, ID_SAVE, ID_EDITOR, ID_ABOUT
 };
 constexpr UINT WM_APP_DONE = WM_APP + 1;
 
 const COLORREF kBg = RGB(0x12, 0x12, 0x1A);
 const COLORREF kBg2 = RGB(0x1A, 0x1A, 0x24);
 const COLORREF kText = RGB(0xE8, 0xE8, 0xF0);
+const COLORREF kText3 = RGB(0x78, 0x78, 0xA0);
 
 HWND g_main = nullptr;
-HWND g_srcCaption, g_source, g_refresh, g_file, g_srcInfo;
-HWND g_modeUrl, g_modeRegex, g_ascii, g_utf16, g_b64, g_hex;
-HWND g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath;
-HWND g_customLabel, g_custom, g_scan, g_cancel, g_status, g_results, g_copy, g_save, g_editor, g_by;
-HFONT g_font = nullptr;
+HWND g_secSource, g_search, g_source, g_refresh, g_file, g_srcInfo;
+HWND g_secFind, g_modeUrl, g_modeRegex, g_urlHint;
+HWND g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel, g_custom;
+HWND g_secDecode, g_ascii, g_utf16, g_b64, g_hex;
+HWND g_scan, g_cancel, g_status;
+HWND g_secResults, g_results, g_copy, g_save, g_editor, g_about, g_by;
+HFONT g_font = nullptr, g_fontHdr = nullptr;
 HBRUSH g_bgBrush = nullptr, g_bg2Brush = nullptr;
 
-std::vector<fxchain::RipProcess> g_procs;
+std::vector<fxchain::RipProcess> g_procsAll;   // full enumeration
+std::vector<fxchain::RipProcess> g_procsView;  // what the combo currently shows
 std::atomic<bool> g_cancelFlag{false};
 std::atomic<bool> g_scanning{false};
+std::atomic<long long> g_elapsedMs{0};
 std::vector<ur::Group> g_lastResults;
 ur::Mode g_lastMode = ur::Mode::Urls;
 std::wstring g_chosenFile;
 uint32_t g_autoRipPid = 0;
-// filled by the worker before WM_APP_DONE, read on the UI thread in onDone
 uint32_t g_scanPid = 0;
 bool g_scanDenied = false;
 bool g_scanNeedsElev = false;
 
-HWND mkStatic(HWND p, const wchar_t* t) {
-    return CreateWindowExW(0, L"STATIC", t, WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, p, nullptr, nullptr, nullptr);
+HWND mkStatic(HWND p, const wchar_t* t, DWORD extra = 0) {
+    return CreateWindowExW(0, L"STATIC", t, WS_CHILD | WS_VISIBLE | SS_LEFT | extra,
+                           0, 0, 0, 0, p, nullptr, nullptr, nullptr);
 }
 HWND mkButton(HWND p, const wchar_t* t, int id, DWORD style = 0) {
     return CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
                            0, 0, 0, 0, p, (HMENU)(INT_PTR)id, nullptr, nullptr);
 }
-void setFont(HWND h) { SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE); }
+void setFont(HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); }
 bool isChecked(HWND h) { return SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED; }
 
-void refreshProcesses() {
-    g_procs = fxchain::ripBackend().enumerate();
-    std::sort(g_procs.begin(), g_procs.end(),
-              [](const fxchain::RipProcess& a, const fxchain::RipProcess& b) {
-                  return _stricmp(a.name.c_str(), b.name.c_str()) < 0;
-              });
+void showAbout() {
+    std::string s;
+    s += "URLRipper " URLRIPPER_VERSION "\r\n";
+    s += "by Akustikrausch\r\n";
+    s += "Build " UR_STR(URLRIPPER_BUILD) ", built " __DATE__ " " __TIME__ "\r\n\r\n";
+    s += "Extracts URLs and regex matches from running processes and files.\r\n\r\n";
+    s += "Technical\r\n";
+    s += "  Windows x64, C++20, native Win32 GUI (no UI framework).\r\n";
+    s += "  Single portable exe, static C runtime, no DLLs to ship.\r\n";
+    s += "  Multi-threaded scan: one reader thread feeds a worker pool of (cores - 2).\r\n";
+    s += "  URL matching is hand-rolled (no regex); regex mode uses std::regex.\r\n";
+    s += "  Decodes ASCII/ANSI/UTF-8, UTF-16 LE/BE, Base64 and Hex.\r\n";
+    s += "  Process memory is read through FXChainPlayer's ripper backend.\r\n\r\n";
+    s += "Open source\r\n";
+    s += "  No third-party open-source components are bundled.\r\n";
+    s += "  Built on the Windows API and the C++ standard library only.\r\n";
+    s += "  The process reader is reused from Akustikrausch's FXChainPlayer.\r\n";
+    MessageBoxW(g_main, widen(s).c_str(), L"About URLRipper", MB_OK | MB_ICONINFORMATION);
+}
+
+void fillCombo() {
     SendMessageW(g_source, CB_RESETCONTENT, 0, 0);
-    for (const auto& p : g_procs) {
+    for (const auto& p : g_procsView) {
         wchar_t line[256];
         _snwprintf_s(line, _TRUNCATE, L"%s   (pid %u, %llu MB%s%s)",
                      widen(p.name).c_str(), p.pid,
@@ -288,7 +316,31 @@ void refreshProcesses() {
                      p.access == fxchain::RipAccess::NeedsElevation ? L", needs admin" : L"");
         SendMessageW(g_source, CB_ADDSTRING, 0, (LPARAM)line);
     }
-    if (!g_procs.empty()) SendMessageW(g_source, CB_SETCURSEL, 0, 0);
+    if (!g_procsView.empty()) SendMessageW(g_source, CB_SETCURSEL, 0, 0);
+}
+
+void applyProcFilter() {
+    wchar_t q[128] = L"";
+    GetWindowTextW(g_search, q, 128);
+    std::string query = narrow(q);
+    std::transform(query.begin(), query.end(), query.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    g_procsView.clear();
+    for (const auto& p : g_procsAll) {
+        if (query.empty()) { g_procsView.push_back(p); continue; }
+        std::string name = p.name;
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+        if (name.find(query) != std::string::npos) g_procsView.push_back(p);
+    }
+    fillCombo();
+}
+
+void refreshProcesses() {
+    g_procsAll = fxchain::ripBackend().enumerate();
+    std::sort(g_procsAll.begin(), g_procsAll.end(),
+              [](const fxchain::RipProcess& a, const fxchain::RipProcess& b) {
+                  return _stricmp(a.name.c_str(), b.name.c_str()) < 0;
+              });
+    applyProcFilter();
 }
 
 void pickFile() {
@@ -327,18 +379,27 @@ ur::Options gatherOptions() {
     return o;
 }
 
+// Regex controls appear only in Regex mode; a scheme hint appears only in URL
+// mode. Nothing is greyed-out: the mode decides what is on screen.
+void updateModeVisibility() {
+    bool regex = isChecked(g_modeRegex);
+    int rx = regex ? SW_SHOW : SW_HIDE;
+    for (HWND h : {g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel, g_custom})
+        ShowWindow(h, rx);
+    ShowWindow(g_urlHint, regex ? SW_HIDE : SW_SHOW);
+}
+
 void setScanningUi(bool on) {
     g_scanning = on;
     EnableWindow(g_scan, !on);
     EnableWindow(g_cancel, on);
-    EnableWindow(g_copy, !on);
-    EnableWindow(g_save, !on);
-    EnableWindow(g_editor, !on);
+    if (on) { EnableWindow(g_copy, FALSE); EnableWindow(g_save, FALSE); EnableWindow(g_editor, FALSE); }
 }
 
-void setRegexMode() {
-    SendMessageW(g_modeUrl, BM_SETCHECK, BST_UNCHECKED, 0);
-    SendMessageW(g_modeRegex, BM_SETCHECK, BST_CHECKED, 0);
+void enableResultActions(bool on) {
+    EnableWindow(g_copy, on);
+    EnableWindow(g_save, on);
+    EnableWindow(g_editor, on);
 }
 
 void populateResults(const std::vector<ur::Group>& groups) {
@@ -376,11 +437,13 @@ void onDone(std::vector<ur::Group>* groups) {
     g_lastResults = std::move(*groups);
     delete groups;
     populateResults(g_lastResults);
-    std::wstring msg = std::to_wstring(ur::countFindings(g_lastResults)) + L" results in " +
-                       std::to_wstring(g_lastResults.size()) + L" groups, sorted Z to A";
-    if (g_cancelFlag) msg += L" (cancelled)";
-    SetWindowTextW(g_status, msg.c_str());
+    wchar_t msg[256];
+    _snwprintf_s(msg, _TRUNCATE, L"%zu results in %zu groups, sorted Z to A   (%.2f s)%s",
+                 ur::countFindings(g_lastResults), g_lastResults.size(),
+                 g_elapsedMs.load() / 1000.0, g_cancelFlag ? L"  (cancelled)" : L"");
+    SetWindowTextW(g_status, msg);
     setScanningUi(false);
+    enableResultActions(!g_lastResults.empty());
     if (g_scanDenied) {
         if (g_scanNeedsElev && g_scanPid) {
             if (MessageBoxW(g_main, L"This process runs with higher rights. Relaunch URLRipper as administrator to scan it?",
@@ -390,6 +453,12 @@ void onDone(std::vector<ur::Group>* groups) {
             MessageBoxW(g_main, L"Could not open that process for reading.", L"URLRipper", MB_ICONWARNING);
         }
     }
+}
+
+void setRegexMode() {
+    SendMessageW(g_modeUrl, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(g_modeRegex, BM_SETCHECK, BST_CHECKED, 0);
+    updateModeVisibility();
 }
 
 void doScan() {
@@ -406,7 +475,7 @@ void doScan() {
     std::wstring file = g_chosenFile;
     if (file.empty()) {
         int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
-        if (sel >= 0 && sel < (int)g_procs.size()) pid = g_procs[sel].pid;
+        if (sel >= 0 && sel < (int)g_procsView.size()) pid = g_procsView[sel].pid;
     }
     if (!pid && file.empty()) {
         MessageBoxW(g_main, L"Choose a process or a file first.", L"URLRipper", MB_ICONINFORMATION);
@@ -421,14 +490,14 @@ void doScan() {
     std::thread([o, pid, file]() {
         auto* result = new std::vector<ur::Group>();
         bool denied = false, needsElev = false;
+        auto t0 = std::chrono::steady_clock::now();
         try {
             ur::Detector det(o);
-            if (pid) {
-                *result = scanProcess(det, pid, [] { return g_cancelFlag.load(); }, denied, needsElev);
-            } else {
-                *result = scanPaths(det, {std::filesystem::path(file)});
-            }
+            if (pid) *result = scanProcess(det, pid, [] { return g_cancelFlag.load(); }, denied, needsElev);
+            else *result = scanPaths(det, {std::filesystem::path(file)});
         } catch (...) {}
+        g_elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
         g_scanDenied = denied;
         g_scanNeedsElev = needsElev;
         PostMessageW(g_main, WM_APP_DONE, 0, (LPARAM)result);
@@ -487,49 +556,70 @@ void sendToEditor() {
 }
 
 void layout(int cw, int ch) {
-    const int m = 12, rh = 24, gap = 8;
+    const int m = 12, rh = 24, gap = 10, hh = 15;
     int y = m;
-    MoveWindow(g_srcCaption, m, y + 3, 55, rh, TRUE);
-    MoveWindow(g_source, m + 60, y, cw - m * 2 - 60 - 180, 360, TRUE);
+
+    // SOURCE
+    MoveWindow(g_secSource, m, y, 200, hh, TRUE); y += hh + 2;
+    MoveWindow(g_search, m, y, cw - m * 2 - 180, rh, TRUE);
     MoveWindow(g_refresh, cw - m - 174, y, 84, rh, TRUE);
     MoveWindow(g_file, cw - m - 84, y, 84, rh, TRUE);
     y += rh + 4;
-    MoveWindow(g_srcInfo, m, y, cw - m * 2, 18, TRUE);
-    y += 18 + gap;
+    MoveWindow(g_source, m, y, cw - m * 2, 360, TRUE);   // 360 = dropdown height
+    y += rh + 2;
+    MoveWindow(g_srcInfo, m, y, cw - m * 2, hh, TRUE);
+    y += hh + gap;
 
+    // WHAT TO FIND
+    MoveWindow(g_secFind, m, y, 200, hh, TRUE); y += hh + 2;
     MoveWindow(g_modeUrl, m, y, 66, rh, TRUE);
     MoveWindow(g_modeRegex, m + 70, y, 74, rh, TRUE);
-    int ex = m + 160;
-    MoveWindow(g_ascii, ex, y, 66, rh, TRUE);
-    MoveWindow(g_utf16, ex + 70, y, 74, rh, TRUE);
-    MoveWindow(g_b64, ex + 150, y, 74, rh, TRUE);
-    MoveWindow(g_hex, ex + 228, y, 58, rh, TRUE);
-    y += rh + gap;
-
-    MoveWindow(g_presetLabel, m, y + 3, 55, 18, TRUE);
+    y += rh + 2;
+    int detailY = y;
+    MoveWindow(g_urlHint, m, detailY + 3, cw - m * 2, hh, TRUE);
+    MoveWindow(g_presetLabel, m, detailY + 3, 55, hh, TRUE);
     int px = m + 60;
-    MoveWindow(g_pEmail, px, y, 66, rh, TRUE);
-    MoveWindow(g_pIpv4, px + 68, y, 58, rh, TRUE);
-    MoveWindow(g_pIpv6, px + 128, y, 58, rh, TRUE);
-    MoveWindow(g_pGuid, px + 188, y, 62, rh, TRUE);
-    MoveWindow(g_pApi, px + 252, y, 76, rh, TRUE);
-    MoveWindow(g_pPath, px + 330, y, 82, rh, TRUE);
-    y += rh + 4;
-    MoveWindow(g_customLabel, m, y + 3, 55, 18, TRUE);
-    MoveWindow(g_custom, m + 60, y, cw - m * 2 - 60, rh, TRUE);
+    MoveWindow(g_pEmail, px, detailY, 66, rh, TRUE);
+    MoveWindow(g_pIpv4, px + 68, detailY, 58, rh, TRUE);
+    MoveWindow(g_pIpv6, px + 128, detailY, 58, rh, TRUE);
+    MoveWindow(g_pGuid, px + 188, detailY, 62, rh, TRUE);
+    MoveWindow(g_pApi, px + 252, detailY, 76, rh, TRUE);
+    MoveWindow(g_pPath, px + 330, detailY, 82, rh, TRUE);
+    MoveWindow(g_customLabel, m, detailY + rh + 4 + 3, 55, hh, TRUE);
+    MoveWindow(g_custom, m + 60, detailY + rh + 4, cw - m * 2 - 60, rh, TRUE);
+    y = detailY + rh + 4 + rh + gap;   // reserve both regex rows
+
+    // DECODE
+    MoveWindow(g_secDecode, m, y, 200, hh, TRUE); y += hh + 2;
+    MoveWindow(g_ascii, m, y, 66, rh, TRUE);
+    MoveWindow(g_utf16, m + 70, y, 74, rh, TRUE);
+    MoveWindow(g_b64, m + 150, y, 74, rh, TRUE);
+    MoveWindow(g_hex, m + 228, y, 58, rh, TRUE);
     y += rh + gap;
 
+    // scan bar
     MoveWindow(g_scan, m, y, 100, rh + 2, TRUE);
     MoveWindow(g_cancel, m + 108, y, 90, rh + 2, TRUE);
-    MoveWindow(g_status, m + 210, y + 4, cw - m * 2 - 210, 18, TRUE);
+    MoveWindow(g_status, m + 210, y + 4, cw - m * 2 - 210, hh, TRUE);
     y += rh + 2 + gap;
 
+    // RESULTS  (header row carries the by-line on the right so nothing clips)
+    MoveWindow(g_secResults, m, y, 200, hh, TRUE);
+    MoveWindow(g_by, cw - m - 200, y, 200, hh, TRUE);
+    y += hh + 2;
     int bottom = ch - m - rh;
-    MoveWindow(g_results, m, y, cw - m * 2, (bottom - gap) - y, TRUE);
+    int listH = (bottom - gap) - y;
+    if (listH < 60) listH = 60;
+    MoveWindow(g_results, m, y, cw - m * 2, listH, TRUE);
+    // let the Value column soak up the width so long URLs stay readable
+    int listW = cw - m * 2 - 24;
+    int valW = listW - 90 - 220;
+    ListView_SetColumnWidth(g_results, 0, valW > 160 ? valW : 160);
+
     MoveWindow(g_copy, m, bottom, 120, rh, TRUE);
     MoveWindow(g_save, m + 128, bottom, 120, rh, TRUE);
     MoveWindow(g_editor, m + 256, bottom, 140, rh, TRUE);
-    MoveWindow(g_by, cw - m - 170, bottom + 4, 170, 18, TRUE);
+    MoveWindow(g_about, cw - m - 84, bottom, 84, rh, TRUE);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -538,10 +628,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                              DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        g_fontHdr = CreateFontW(-12, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
         g_bgBrush = CreateSolidBrush(kBg);
         g_bg2Brush = CreateSolidBrush(kBg2);
 
-        g_srcCaption = mkStatic(hwnd, L"Source:");
+        g_secSource = mkStatic(hwnd, L"SOURCE");
+        g_search = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)ID_SEARCH, nullptr, nullptr);
+        SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"Filter processes by name...");
         g_source = CreateWindowExW(0, L"COMBOBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
             0, 0, 0, 0, hwnd, (HMENU)ID_SOURCE, nullptr, nullptr);
@@ -549,15 +645,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_file = mkButton(hwnd, L"File...", ID_FILE);
         g_srcInfo = mkStatic(hwnd, L"No file chosen; scanning the selected process.");
 
+        g_secFind = mkStatic(hwnd, L"WHAT TO FIND");
         g_modeUrl = mkButton(hwnd, L"URLs", ID_MODE_URL, BS_AUTORADIOBUTTON | WS_GROUP);
         g_modeRegex = mkButton(hwnd, L"Regex", ID_MODE_REGEX, BS_AUTORADIOBUTTON);
         SendMessageW(g_modeUrl, BM_SETCHECK, BST_CHECKED, 0);
-
-        g_ascii = mkButton(hwnd, L"ASCII", ID_ENC_ASCII, BS_AUTOCHECKBOX);
-        g_utf16 = mkButton(hwnd, L"UTF-16", ID_ENC_UTF16, BS_AUTOCHECKBOX);
-        g_b64 = mkButton(hwnd, L"Base64", ID_ENC_B64, BS_AUTOCHECKBOX);
-        g_hex = mkButton(hwnd, L"Hex", ID_ENC_HEX, BS_AUTOCHECKBOX);
-        for (HWND h : {g_ascii, g_utf16, g_b64, g_hex}) SendMessageW(h, BM_SETCHECK, BST_CHECKED, 0);
+        g_urlHint = mkStatic(hwnd, L"Finds http, https, ftp, ws, wss, rtsp, rtmp and udp links, grouped by domain.");
 
         g_presetLabel = mkStatic(hwnd, L"Preset:");
         g_pEmail = mkButton(hwnd, L"Email", ID_P_EMAIL, BS_AUTOCHECKBOX);
@@ -569,14 +661,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendMessageW(g_pEmail, BM_SETCHECK, BST_CHECKED, 0);
         g_customLabel = mkStatic(hwnd, L"Custom:");
         g_custom = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-            0, 0, 0, 0, hwnd, (HMENU)ID_CUSTOM, nullptr, nullptr);
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)ID_CUSTOM, nullptr, nullptr);
+        SendMessageW(g_custom, EM_SETCUEBANNER, TRUE, (LPARAM)L"your own regex (ECMAScript)...");
+
+        g_secDecode = mkStatic(hwnd, L"DECODE");
+        g_ascii = mkButton(hwnd, L"ASCII", ID_ENC_ASCII, BS_AUTOCHECKBOX);
+        g_utf16 = mkButton(hwnd, L"UTF-16", ID_ENC_UTF16, BS_AUTOCHECKBOX);
+        g_b64 = mkButton(hwnd, L"Base64", ID_ENC_B64, BS_AUTOCHECKBOX);
+        g_hex = mkButton(hwnd, L"Hex", ID_ENC_HEX, BS_AUTOCHECKBOX);
+        for (HWND h : {g_ascii, g_utf16, g_b64, g_hex}) SendMessageW(h, BM_SETCHECK, BST_CHECKED, 0);
 
         g_scan = mkButton(hwnd, L"Scan", ID_SCAN, BS_DEFPUSHBUTTON);
         g_cancel = mkButton(hwnd, L"Cancel", ID_CANCEL);
         EnableWindow(g_cancel, FALSE);
         g_status = mkStatic(hwnd, L"Ready.");
 
+        g_secResults = mkStatic(hwnd, L"RESULTS");
         g_results = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
             0, 0, 0, 0, hwnd, (HMENU)ID_RESULTS, nullptr, nullptr);
@@ -593,22 +693,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_copy = mkButton(hwnd, L"Copy selected", ID_COPY);
         g_save = mkButton(hwnd, L"Save as TXT", ID_SAVE);
         g_editor = mkButton(hwnd, L"Send to editor", ID_EDITOR);
+        g_about = mkButton(hwnd, L"About", ID_ABOUT);
+        enableResultActions(false);
         g_by = CreateWindowExW(0, L"STATIC", L"by Akustikrausch",
             WS_CHILD | WS_VISIBLE | SS_RIGHT, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
 
-        for (HWND h : {g_srcCaption, g_source, g_refresh, g_file, g_srcInfo, g_modeUrl, g_modeRegex,
-                       g_ascii, g_utf16, g_b64, g_hex, g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6,
-                       g_pGuid, g_pApi, g_pPath, g_customLabel, g_custom, g_scan, g_cancel, g_status,
-                       g_results, g_copy, g_save, g_editor, g_by})
-            setFont(h);
+        for (HWND h : {g_search, g_source, g_refresh, g_file, g_srcInfo, g_modeUrl, g_modeRegex, g_urlHint,
+                       g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel,
+                       g_custom, g_ascii, g_utf16, g_b64, g_hex, g_scan, g_cancel, g_status, g_results,
+                       g_copy, g_save, g_editor, g_about, g_by})
+            setFont(h, g_font);
+        for (HWND h : {g_secSource, g_secFind, g_secDecode, g_secResults})
+            setFont(h, g_fontHdr);
 
         BOOL dark = TRUE;
         DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
 
         refreshProcesses();
+        updateModeVisibility();
         if (g_autoRipPid) {
-            for (int i = 0; i < (int)g_procs.size(); ++i)
-                if (g_procs[i].pid == g_autoRipPid) { SendMessageW(g_source, CB_SETCURSEL, i, 0); break; }
+            for (int i = 0; i < (int)g_procsView.size(); ++i)
+                if (g_procsView[i].pid == g_autoRipPid) { SendMessageW(g_source, CB_SETCURSEL, i, 0); break; }
             PostMessageW(hwnd, WM_COMMAND, ID_SCAN, 0);
         }
         return 0;
@@ -616,7 +721,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SIZE:
         layout(LOWORD(lp), HIWORD(lp));
         return 0;
-    case WM_CTLCOLORSTATIC:
+    case WM_GETMINMAXINFO: {
+        auto* mmi = (MINMAXINFO*)lp;
+        mmi->ptMinTrackSize.x = 780;
+        mmi->ptMinTrackSize.y = 580;
+        return 0;
+    }
+    case WM_CTLCOLORSTATIC: {
+        HDC dc = (HDC)wp;
+        HWND ctl = (HWND)lp;
+        SetTextColor(dc, (ctl == g_secSource || ctl == g_secFind || ctl == g_secDecode ||
+                          ctl == g_secResults || ctl == g_srcInfo || ctl == g_urlHint || ctl == g_by)
+                         ? kText3 : kText);
+        SetBkColor(dc, kBg);
+        return (LRESULT)g_bgBrush;
+    }
     case WM_CTLCOLORBTN: {
         HDC dc = (HDC)wp;
         SetTextColor(dc, kText);
@@ -637,17 +756,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_COMMAND:
         switch (LOWORD(wp)) {
+        case ID_SEARCH: if (HIWORD(wp) == EN_CHANGE) applyProcFilter(); break;
         case ID_REFRESH: refreshProcesses(); break;
         case ID_FILE: pickFile(); break;
+        case ID_MODE_URL: case ID_MODE_REGEX: updateModeVisibility(); break;
         case ID_SCAN: doScan(); break;
         case ID_CANCEL: g_cancelFlag = true; SetWindowTextW(g_status, L"Cancelling..."); break;
         case ID_COPY: copySelected(); break;
         case ID_SAVE: saveAsTxt(); break;
         case ID_EDITOR: sendToEditor(); break;
-        case ID_P_EMAIL: case ID_P_IPV4: case ID_P_IPV6:
-        case ID_P_GUID: case ID_P_APIKEY: case ID_P_PATH:
-            if (isChecked((HWND)lp)) setRegexMode();
-            break;
+        case ID_ABOUT: showAbout(); break;
         case ID_CUSTOM:
             if (HIWORD(wp) == EN_CHANGE && GetWindowTextLengthW(g_custom) > 0) setRegexMode();
             break;
@@ -655,8 +773,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (HIWORD(wp) == CBN_SELCHANGE) {
                 g_chosenFile.clear();
                 int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
-                if (sel >= 0 && sel < (int)g_procs.size())
-                    SetWindowTextW(g_srcInfo, (L"Scanning process: " + widen(g_procs[sel].name) +
+                if (sel >= 0 && sel < (int)g_procsView.size())
+                    SetWindowTextW(g_srcInfo, (L"Scanning process: " + widen(g_procsView[sel].name) +
                         L"   (or pick a file)").c_str());
             }
             break;
@@ -687,8 +805,8 @@ int runGui(HINSTANCE hInst) {
     wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
     RegisterClassExW(&wc);
 
-    g_main = CreateWindowExW(0, wc.lpszClassName, L"URLRipper",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 980, 720,
+    g_main = CreateWindowExW(0, wc.lpszClassName, L"URLRipper " URLRIPPER_VERSION,
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1000, 760,
         nullptr, nullptr, hInst, nullptr);
     if (!g_main) return 1;
     ShowWindow(g_main, SW_SHOW);
@@ -706,8 +824,6 @@ int runGui(HINSTANCE hInst) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
-    // FXChainPlayer's ripper relaunches elevated with "--rip-pid N"; honor it by
-    // opening the GUI pre-targeted at that process.
     for (int i = 1; i < __argc; ++i)
         if (wcscmp(__wargv[i], L"--rip-pid") == 0 && i + 1 < __argc)
             g_autoRipPid = (uint32_t)wcstoul(__wargv[i + 1], nullptr, 10);
