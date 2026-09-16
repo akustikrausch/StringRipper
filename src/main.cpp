@@ -199,7 +199,7 @@ HWND g_main = nullptr;
 HWND g_srcCaption, g_source, g_refresh, g_file, g_srcInfo;
 HWND g_modeUrl, g_modeRegex, g_ascii, g_utf16, g_b64, g_hex;
 HWND g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath;
-HWND g_customLabel, g_custom, g_scan, g_cancel, g_status, g_results, g_copy, g_save, g_editor;
+HWND g_customLabel, g_custom, g_scan, g_cancel, g_status, g_results, g_copy, g_save, g_editor, g_by;
 HFONT g_font = nullptr;
 HBRUSH g_bgBrush = nullptr, g_bg2Brush = nullptr;
 
@@ -283,10 +283,11 @@ void setScanningUi(bool on) {
     EnableWindow(g_editor, !on);
 }
 
-void updateModeEnable() {
-    BOOL rx = isChecked(g_modeRegex);
-    for (HWND h : {g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_custom, g_customLabel, g_presetLabel})
-        EnableWindow(h, rx);
+// Presets and the custom field stay enabled at all times; ticking any of them
+// switches the tool into Regex mode so nothing sits greyed-out and unclickable.
+void setRegexMode() {
+    SendMessageW(g_modeUrl, BM_SETCHECK, BST_UNCHECKED, 0);
+    SendMessageW(g_modeRegex, BM_SETCHECK, BST_CHECKED, 0);
 }
 
 void populateResults(const std::vector<ur::Group>& groups) {
@@ -438,7 +439,9 @@ void layout(int cw, int ch) {
     const int m = 12, rh = 24, gap = 8;
     int y = m;
     MoveWindow(g_srcCaption, m, y + 3, 55, rh, TRUE);
-    MoveWindow(g_source, m + 60, y, cw - m * 2 - 60 - 180, rh, TRUE);
+    // Height sets the DROP-DOWN list size for a combo box, not the field; give
+    // it real room or the process list cannot open.
+    MoveWindow(g_source, m + 60, y, cw - m * 2 - 60 - 180, 360, TRUE);
     MoveWindow(g_refresh, cw - m - 174, y, 84, rh, TRUE);
     MoveWindow(g_file, cw - m - 84, y, 84, rh, TRUE);
     y += rh + 4;
@@ -477,6 +480,7 @@ void layout(int cw, int ch) {
     MoveWindow(g_copy, m, bottom, 120, rh, TRUE);
     MoveWindow(g_save, m + 128, bottom, 120, rh, TRUE);
     MoveWindow(g_editor, m + 256, bottom, 140, rh, TRUE);
+    MoveWindow(g_by, cw - m - 170, bottom + 4, 170, 18, TRUE);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -540,18 +544,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_copy = mkButton(hwnd, L"Copy selected", ID_COPY);
         g_save = mkButton(hwnd, L"Save as TXT", ID_SAVE);
         g_editor = mkButton(hwnd, L"Send to editor", ID_EDITOR);
+        g_by = CreateWindowExW(0, L"STATIC", L"by Akustikrausch",
+            WS_CHILD | WS_VISIBLE | SS_RIGHT, 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
 
         for (HWND h : {g_srcCaption, g_source, g_refresh, g_file, g_srcInfo, g_modeUrl, g_modeRegex,
                        g_ascii, g_utf16, g_b64, g_hex, g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6,
                        g_pGuid, g_pApi, g_pPath, g_customLabel, g_custom, g_scan, g_cancel, g_status,
-                       g_results, g_copy, g_save, g_editor})
+                       g_results, g_copy, g_save, g_editor, g_by})
             setFont(h);
 
         BOOL dark = TRUE;
         DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
 
         refreshProcesses();
-        updateModeEnable();
         return 0;
     }
     case WM_SIZE:
@@ -580,13 +585,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         switch (LOWORD(wp)) {
         case ID_REFRESH: refreshProcesses(); break;
         case ID_FILE: pickFile(); break;
-        case ID_MODE_URL:
-        case ID_MODE_REGEX: updateModeEnable(); break;
         case ID_SCAN: doScan(); break;
         case ID_CANCEL: g_cancelFlag = true; SetWindowTextW(g_status, L"Cancelling..."); break;
         case ID_COPY: copySelected(); break;
         case ID_SAVE: saveAsTxt(); break;
         case ID_EDITOR: sendToEditor(); break;
+        // ticking any pattern selects Regex mode, so nothing is unusable
+        case ID_P_EMAIL: case ID_P_IPV4: case ID_P_IPV6:
+        case ID_P_GUID: case ID_P_APIKEY: case ID_P_PATH:
+            if (isChecked((HWND)lp)) setRegexMode();
+            break;
+        case ID_CUSTOM:
+            if (HIWORD(wp) == EN_CHANGE) {
+                if (GetWindowTextLengthW(g_custom) > 0) setRegexMode();
+            }
+            break;
+        case ID_SOURCE:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                // Choosing a process clears any previously picked file.
+                g_chosenFile.clear();
+                int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
+                if (sel >= 0 && sel < (int)g_procs.size())
+                    SetWindowTextW(g_srcInfo, (L"Scanning process: " +
+                        widen(g_procs[sel].name) + L"   (or pick a file)").c_str());
+            }
+            break;
         }
         return 0;
     case WM_APP_DONE:
