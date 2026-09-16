@@ -1,3 +1,13 @@
-* text=auto eol=lf
-*.exe binary
-*.png binary
+# Text files normalize to LF in the repo; binaries are left byte-for-byte.
+* text=auto
+*.hpp   text eol=lf
+*.cpp   text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.ps1   text eol=lf
+CMakeLists.txt text eol=lf
+LICENSE text eol=lf
+*.exe   binary
+*.exe.manifest binary
+*.png   binary

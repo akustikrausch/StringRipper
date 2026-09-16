@@ -5,4 +5,5 @@
 *.ilk
 *.exp
 *.lib
+*.exe.manifest
 # keep the shipped bin/URLRipper.exe (added explicitly)
