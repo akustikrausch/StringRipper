@@ -1,17 +1,5 @@
-// StringRipper - portable Windows tool.
-//
-// Scans a running process or files/folders for embedded URLs (URL mode) or for
-// regex matches (Regex mode), decoding ASCII/ANSI/UTF-8, UTF-16, Base64 and Hex
-// along the way. Findings are de-duplicated, grouped and sorted Z to A.
-//
-// Reading a process reuses FXChainPlayer's hardened ripper backend
-// (fxchain::ripBackend()). Scanning runs multi-threaded on top of it.
-//
-// Safety, by design: findings are plain selectable text with NO click-to-open;
-// "Save as TXT" / "Send to editor" write the file directly and NEVER use the
-// clipboard; only "Copy selected" touches the clipboard.
-//
-// GUI when launched normally; command line when given arguments (see --help).
+/* StringRipper: URLs and regex out of a process or files. Win32 GUI + CLI.
+   reader = FXChainPlayer's ripBackend(), scan = the pool in scan_driver.hpp. */
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -91,16 +79,12 @@ static std::wstring widen(const std::string& s) {
 
 // ---------------------------------------------------------------- shared text
 
-static std::string resultsToText(const std::vector<ur::Group>& groups, ur::Mode mode) {
+static std::string resultsToText(const std::vector<ur::Group>& groups, ur::Mode) {
     std::string out;
-    out += (mode == ur::Mode::Urls) ? "# StringRipper - URLs\r\n" : "# StringRipper - matches\r\n";
-    out += "# " + std::to_string(ur::countFindings(groups)) + " results in " +
-           std::to_string(groups.size()) + " groups, sorted Z to A\r\n\r\n";
     for (const auto& g : groups) {
-        out += "[" + g.name + "]  (" + std::to_string(g.items.size()) + ")\r\n";
-        for (const auto& f : g.items)
-            out += "  " + f.value + "\t" + ur::encName(f.enc) + "\t" + f.source + "\r\n";
-        out += "\r\n";
+        if (!out.empty()) out += "\r\n";
+        out += g.name + "  (" + std::to_string(g.items.size()) + ")\r\n";
+        for (const auto& f : g.items) out += f.value + "\r\n";
     }
     return out;
 }
@@ -382,8 +366,6 @@ ur::Options gatherOptions() {
     return o;
 }
 
-// Regex controls appear only in Regex mode; a scheme hint appears only in URL
-// mode. Nothing is greyed-out: the mode decides what is on screen.
 void updateModeVisibility() {
     bool regex = isChecked(g_modeRegex);
     int rx = regex ? SW_SHOW : SW_HIDE;
@@ -592,7 +574,6 @@ void layout(int cw, int ch) {
     MoveWindow(g_pPath, px + 330, detailY, 82, rh, TRUE);
     MoveWindow(g_customLabel, m, detailY + rh + 6 + 4, 55, lh, TRUE);
     MoveWindow(g_custom, m + 60, detailY + rh + 6, cw - m * 2 - 60, rh, TRUE);
-    // Reserve two rows only in Regex mode; URL mode needs just the hint line.
     y = regex ? (detailY + rh + 6 + rh + gap) : (detailY + lh + gap);
 
     // DECODE
@@ -616,7 +597,6 @@ void layout(int cw, int ch) {
     int listH = (bottom - gap) - y;
     if (listH < 60) listH = 60;
     MoveWindow(g_results, m, y, cw - m * 2, listH, TRUE);
-    // let the Value column soak up the width so long URLs stay readable
     int listW = cw - m * 2 - 24;
     int valW = listW - 90 - 220;
     ListView_SetColumnWidth(g_results, 0, valW > 160 ? valW : 160);

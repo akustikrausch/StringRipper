@@ -1,28 +1,12 @@
-// file_read.hpp - portable file and folder reading for StringRipper.
+/* expand files and folders (recursive, no symlinks) into a flat file list */
 #pragma once
 
 #include <cstdint>
-#include <fstream>
-#include <string>
-#include <vector>
 #include <filesystem>
+#include <vector>
 
 namespace ur {
 
-// Read a whole file into memory. Returns false on error.
-inline bool readFile(const std::filesystem::path& p, std::vector<uint8_t>& out) {
-    std::error_code ec;
-    auto sz = std::filesystem::file_size(p, ec);
-    if (ec) return false;
-    std::ifstream f(p, std::ios::binary);
-    if (!f) return false;
-    out.resize(static_cast<std::size_t>(sz));
-    if (sz) f.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(sz));
-    return static_cast<bool>(f) || f.eof();
-}
-
-// Expand a list of inputs (files and/or folders) into a flat file list.
-// Folders are walked recursively. Symlinks are not followed.
 inline std::vector<std::filesystem::path>
 expandInputs(const std::vector<std::filesystem::path>& inputs, std::uintmax_t maxBytes = 0) {
     std::vector<std::filesystem::path> files;

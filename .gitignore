@@ -1,9 +1,9 @@
-# build artifacts
 /build/
 *.obj
 *.pdb
 *.ilk
 *.exp
 *.lib
+*.o
 *.exe.manifest
-# keep the shipped bin/StringRipper.exe (added explicitly)
+# bin/StringRipper.exe is committed on purpose

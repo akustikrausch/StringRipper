@@ -1,15 +1,9 @@
-// scan_driver.hpp - multi-threaded scan orchestration for StringRipper.
-//
-// Reading a process is done through FXChainPlayer's IMemoryReader (its hardened
-// Win32 backend: region walk, integrity handling, image classification). This
-// driver walks that reader on ONE thread (a process handle is single-reader)
-// and fans each window out to a worker pool that runs the Detector in parallel,
-// mirroring how the FXChainPlayer ripper overlaps reading with N-core detection.
-// Files are chunked and fed to the same pool.
+/* multi-threaded scan: one reader thread (a process handle is single-reader)
+   fans windows out to a Detector pool. reader = FXChainPlayer's IMemoryReader. */
 #pragma once
 
 #include "scan_core.hpp"
-#include "audio/memory_ripper.h"   // fxchain::IMemoryReader, RipMemoryRegion, RipReadResult
+#include "audio/memory_ripper.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -27,11 +21,11 @@
 namespace ur {
 
 struct DriverLimits {
-    uint64_t    maxBytes = 2ull * 1024 * 1024 * 1024;  // process-scan cap
-    std::size_t window   = 8u * 1024 * 1024;           // read/scan window
-    std::size_t overlap  = 64u * 1024;                 // carry-over so a URL is not split
-    unsigned    threads  = 0;                          // 0 => hardware_concurrency-2
-    bool        skipSystemImages = false;              // skip ntdll etc.
+    uint64_t    maxBytes = 2ull * 1024 * 1024 * 1024;
+    std::size_t window   = 8u * 1024 * 1024;
+    std::size_t overlap  = 64u * 1024;
+    unsigned    threads  = 0;
+    bool        skipSystemImages = false;
 };
 
 inline unsigned chooseThreads(unsigned req) {
@@ -40,8 +34,6 @@ inline unsigned chooseThreads(unsigned req) {
     return hw > 3 ? hw - 2 : 1u;
 }
 
-// Fixed worker pool: each worker owns a Sink; tasks are window buffers scanned
-// by the shared (immutable) Detector. Bounded in-flight bytes give back-pressure.
 class ScanPool {
 public:
     ScanPool(const Detector& det, unsigned threads, std::size_t maxInFlightBytes)
@@ -52,8 +44,6 @@ public:
             workers_.emplace_back([this, i] { worker(i); });
     }
 
-    // Hand a window to the pool. Blocks while too many bytes are in flight so a
-    // 2 GB scan never buffers 2 GB of windows at once.
     void submit(std::vector<uint8_t>&& buf, const std::string& source) {
         std::size_t sz = buf.size();
         std::unique_lock lk(m_);
@@ -103,8 +93,6 @@ private:
     std::size_t maxInFlight_;
 };
 
-// Walk a reader's committed+readable regions and feed windows to the pool.
-// progress(bytesDone) returns false to cancel. Returns bytes submitted.
 inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
                                const std::string& sourceName, const DriverLimits& lim,
                                const std::function<bool(uint64_t)>& progress = {}) {
@@ -116,11 +104,11 @@ inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
         fxchain::RipMemoryRegion region{};
         if (!reader.query(addr, region)) break;
         uint64_t next = region.base + region.size;
-        if (next <= addr) break;   // no forward progress
+        if (next <= addr) break;
         const bool eligible = region.committed && region.readable && !region.guarded &&
                               !(lim.skipSystemImages && region.systemImage);
         if (eligible) {
-            std::vector<uint8_t> tail;             // last `overlap` bytes of prev window
+            std::vector<uint8_t> tail;
             uint64_t off = 0;
             while (off < region.size && total < lim.maxBytes) {
                 std::size_t want = static_cast<std::size_t>(
@@ -131,7 +119,6 @@ inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
                 buf.reserve(tail.size() + r.bytesRead);
                 buf.insert(buf.end(), tail.begin(), tail.end());
                 buf.insert(buf.end(), chunk.begin(), chunk.begin() + r.bytesRead);
-                // carry the overlap forward before the buffer is moved away
                 std::size_t keep = std::min<std::size_t>(lim.overlap, r.bytesRead);
                 tail.assign(chunk.begin() + (r.bytesRead - keep), chunk.begin() + r.bytesRead);
                 char lbl[40];
@@ -147,7 +134,6 @@ inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
     return total;
 }
 
-// Chunk a file and feed it to the pool (overlap so a URL is never split).
 inline bool scanFileInto(const std::filesystem::path& path, ScanPool& pool, const DriverLimits& lim) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;

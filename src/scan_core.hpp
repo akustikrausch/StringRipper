@@ -1,13 +1,5 @@
-// scan_core.hpp - portable, thread-safe detection core for StringRipper.
-//
-// No platform headers: compiles anywhere, so the core has a self-test outside
-// Windows. It takes a raw byte buffer (a window of process memory or a file
-// chunk), pulls candidate strings out of it across encodings (ASCII/ANSI/UTF-8,
-// UTF-16 LE/BE, plus one level of Base64 and Hex), and matches them as URLs
-// (fast hand-rolled scan, no std::regex) or against regex patterns. Each thread
-// scans into its OWN Sink; mergeSinks() de-duplicates globally, groups and sorts
-// Z to A. The Detector is immutable and shared across threads.
-
+/* scan core: strings out of a byte window, matched as URLs or regex, Z->A.
+   platform-free, one Sink per thread, merged at the end. */
 #pragma once
 
 #include <algorithm>
@@ -34,19 +26,15 @@ inline const char* encName(Enc e) {
 enum class Mode { Urls, Regex };
 
 struct Options {
-    bool ascii  = true;    // ASCII/ANSI/UTF-8 printable runs
-    bool utf16  = true;    // UTF-16 LE and BE
-    bool base64 = true;    // decode embedded Base64 one level
-    bool hex    = true;    // decode embedded Hex one level
-
+    bool ascii  = true;
+    bool utf16  = true;
+    bool base64 = true;
+    bool hex    = true;
     std::size_t minRun = 4;
-    std::size_t maxCandidate = 8192;   // skip absurd runs (bounds regex cost)
-
+    std::size_t maxCandidate = 8192;
     Mode mode = Mode::Urls;
-
-    std::vector<std::string> schemes;   // URL mode: allowed schemes (empty = all)
-
-    std::vector<std::string> presets;   // regex mode preset ids
+    std::vector<std::string> schemes;   /* URL mode, empty = all */
+    std::vector<std::string> presets;
     std::string customRegex;
     bool customWholeWord = false;
     bool caseInsensitive = false;
@@ -87,10 +75,9 @@ public:
     explicit RegexError(const std::string& what) : std::runtime_error(what) {}
 };
 
-// Per-thread accumulator. Each worker owns one; scanning never shares state.
 struct Sink {
     std::vector<Finding> items;
-    std::unordered_set<std::string> seen;   // "group\x01value"
+    std::unordered_set<std::string> seen;
     void add(const std::string& value, Enc enc, const std::string& source, const std::string& group) {
         std::string key = group;
         key.push_back('\x01');
@@ -111,7 +98,6 @@ inline bool isBase64Char(char c) {
 inline bool isHexChar(char c) {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
-// URL body characters (after "scheme://").
 inline bool isUrlChar(char c) {
     if (isAlpha(c) || (c >= '0' && c <= '9')) return true;
     switch (c) {
@@ -231,6 +217,44 @@ inline bool schemeKnown(const std::string& s) {
     return false;
 }
 
+inline bool isHostChar(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+}
+
+/* host.tld with a real TLD, a dotted IPv4, or localhost. everything else is a
+   ://-shaped byte run, not a URL. */
+inline bool plausibleHost(const std::string& h) {
+    if (h.size() < 4 || h.size() > 253) return false;
+    if (h == "localhost") return true;
+    std::vector<std::string> labels;
+    std::size_t i = 0;
+    for (;;) {
+        std::size_t dot = h.find('.', i);
+        std::string lab = h.substr(i, (dot == std::string::npos ? h.size() : dot) - i);
+        if (lab.empty() || lab.size() > 63 || lab.front() == '-' || lab.back() == '-') return false;
+        for (char c : lab) if (!isHostChar(c)) return false;
+        labels.push_back(lab);
+        if (dot == std::string::npos) break;
+        i = dot + 1;
+    }
+    if (labels.size() < 2) return false;
+    bool numeric = true;
+    for (auto& lab : labels) for (char c : lab) if (c < '0' || c > '9') { numeric = false; break; }
+    if (numeric) {
+        if (labels.size() != 4) return false;
+        for (auto& lab : labels) {
+            if (lab.size() > 3) return false;
+            int v = 0; for (char c : lab) v = v * 10 + (c - '0');
+            if (v > 255) return false;
+        }
+        return true;
+    }
+    const std::string& tld = labels.back();
+    if (tld.size() < 2) return false;
+    for (char c : tld) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) return false;
+    return true;
+}
+
 } // namespace detail
 
 class Detector {
@@ -259,7 +283,6 @@ public:
 
     bool urlMode() const { return urlMode_; }
 
-    // Thread-safe: writes only into the caller-owned sink.
     void scan(const uint8_t* data, std::size_t n, const std::string& source, Sink& sink) const {
         std::vector<std::string> ascii;
         detail::extractAscii(data, n, opt_.minRun, ascii);
@@ -304,8 +327,6 @@ private:
         else matchRegex(s, enc, source, sink);
     }
 
-    // Fast hand-rolled URL scan: find "://", grab the scheme left of it and the
-    // body right of it, no std::regex.
     void matchUrls(const std::string& s, Enc enc, const std::string& source, Sink& sink) const {
         std::size_t pos = 0;
         while ((pos = s.find("://", pos)) != std::string::npos) {
@@ -318,11 +339,11 @@ private:
             std::size_t end = pos + 3;
             while (end < s.size() && detail::isUrlChar(s[end])) ++end;
             std::string url = detail::trimUrl(s.substr(start, end - start));
-            if (url.size() >= 8) {
-                if (opt_.schemes.empty() ||
-                    std::find(opt_.schemes.begin(), opt_.schemes.end(), scheme) != opt_.schemes.end())
-                    sink.add(url, enc, source, detail::urlHost(url));
-            }
+            std::string host = detail::urlHost(url);
+            if (url.size() >= 8 && detail::plausibleHost(host) &&
+                (opt_.schemes.empty() ||
+                 std::find(opt_.schemes.begin(), opt_.schemes.end(), scheme) != opt_.schemes.end()))
+                sink.add(url, enc, source, host);
             pos = end;
         }
     }
@@ -344,7 +365,6 @@ private:
     std::vector<std::string> names_;
 };
 
-// Merge per-thread sinks: global de-dup, group (by domain/pattern), sort Z to A.
 inline std::vector<Group> mergeSinks(std::vector<Sink>& sinks) {
     std::unordered_set<std::string> seen;
     std::vector<Group> groups;

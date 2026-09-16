@@ -32,9 +32,15 @@ reads process memory; that is the nature of this class of tool.
   re-scanned, and the finding is labelled with the encoding it was hidden
   behind).
 - **URL mode:** `scheme://host/...` for http, https, ftp(s), ws(s), rtsp, rtmp,
-  mms, udp. Grouped by domain. Optional scheme filter.
+  mms, udp. Grouped by domain. The host must be real (a domain with a TLD, a
+  dotted IPv4, or localhost), so `://`-shaped byte runs are skipped. Optional
+  scheme filter.
 - **Regex mode:** built-in presets (email, IPv4, IPv6, GUID, API key, file path)
   and a custom ECMAScript pattern. Grouped by pattern.
+
+Export (Save as TXT / Send to editor) is the grouped list from the window
+without the encoding and source columns: a `domain (count)` line, its values
+flush-left beneath it, one per line, for easy mass copy.
 
 ## Safety by design
 

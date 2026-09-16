@@ -78,6 +78,24 @@ int main() {
         CHECK(b64enc, "base64 finding labelled Base64");
     }
 
+    // false positives: :// without a real host is skipped
+    {
+        std::vector<uint8_t> b;
+        appendAscii(b, "http://nothing");             // no dot
+        appendAscii(b, "http://a.b");                 // 1-char tld
+        appendAscii(b, "http://256.1.1.1/x");         // not a valid ipv4
+        appendAscii(b, "http://1.2.3.4/ok");          // ipv4 ok
+        appendAscii(b, "https://real.example.com/ok");// ok
+        ur::Options o;
+        auto g = run(o, b);
+        CHECK(!hasGroup(g, "nothing"), "host without dot skipped");
+        CHECK(!hasGroup(g, "a.b"), "one-char tld skipped");
+        CHECK(!hasGroup(g, "256.1.1.1"), "bad ipv4 skipped");
+        CHECK(hasGroup(g, "1.2.3.4"), "ipv4 host kept");
+        CHECK(hasGroup(g, "real.example.com"), "valid host kept");
+        CHECK(g.size() == 2, "only the two valid hosts");
+    }
+
     // Regex mode: email + AWS key
     {
         ur::Options o; o.mode = ur::Mode::Regex; o.presets = {"email", "apikey"};
