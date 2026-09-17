@@ -33,5 +33,6 @@ The C/C++ reads like a veteran demoscene coder wrote it. Non-negotiable.
   keeps the static C runtime because it uses `<regex>`, `<thread>`,
   `<filesystem>`.
 - Still lean: LTO on (`/GL /LTCG`), `/O2 /Gy`, link `/OPT:REF /OPT:ICF`, one exe,
-  no DLLs.
+  no DLLs. Manifest is embedded (`/MANIFEST:EMBED`): the bare exe needs
+  comctl32 v6 for the grouped list.
 - The reader is compiled from FXChainPlayer, not vendored (see README).

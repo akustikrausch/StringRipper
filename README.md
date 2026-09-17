@@ -63,6 +63,8 @@ cmake -DFXCHAINPLAYER_DIR=<checkout>
 
 Run it without arguments if you want the GUI. Pick/filter a process or file, choose URL or Regex mode, select the encodings and hit Scan.
 
+You can also drop files or folders straight onto the window. Several at once is fine, folders get walked recursively. A drop only sets the source, you still hit Scan yourself... I don't want it chewing through a 40 GB folder just because something slipped out of Explorer.
+
 CLI works too:
 
 ```text
@@ -72,7 +74,7 @@ StringRipper.exe --folder .\dump --regex "\bAKIA[0-9A-Z]{16}\b" --out keys.txt
 StringRipper.exe --help
 ```
 
-Reading a higher-integrity process needs an elevated StringRipper. Windows being Windows :)
+Reading a higher-integrity process needs an elevated StringRipper. Windows being Windows :) Drag and drop keeps working when it runs elevated, the drop messages are let through on purpose.
 
 ## Source layout
 

@@ -51,7 +51,7 @@ name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #ifndef STRINGRIPPER_VERSION
-#define STRINGRIPPER_VERSION "1.0.2"
+#define STRINGRIPPER_VERSION "1.0.3"
 #endif
 #ifndef STRINGRIPPER_BUILD
 #define STRINGRIPPER_BUILD 0
@@ -252,7 +252,7 @@ std::atomic<bool> g_scanning{false};
 std::atomic<long long> g_elapsedMs{0};
 std::vector<ur::Group> g_lastResults;
 ur::Mode g_lastMode = ur::Mode::Urls;
-std::wstring g_chosenFile;
+std::vector<std::filesystem::path> g_chosenPaths;
 uint32_t g_autoRipPid = 0;
 uint32_t g_scanPid = 0;
 bool g_scanDenied = false;
@@ -260,6 +260,7 @@ bool g_scanNeedsElev = false;
 
 void layout(int cw, int ch);
 void relayout(HWND hwnd);
+void setSourcePaths(std::vector<std::filesystem::path> paths);
 
 HWND mkStatic(HWND p, const wchar_t* t, DWORD extra = 0) {
     return CreateWindowExW(0, L"STATIC", t, WS_CHILD | WS_VISIBLE | SS_LEFT | extra,
@@ -332,10 +333,35 @@ void pickFile() {
     ofn.nMaxFile = 4096;
     ofn.lpstrFilter = L"All files\0*.*\0";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-    if (::GetOpenFileNameW(&ofn)) {
-        g_chosenFile = buf;
-        SetWindowTextW(g_srcInfo, (L"File: " + g_chosenFile + L"   (pick a process to clear)").c_str());
+    if (::GetOpenFileNameW(&ofn)) setSourcePaths({std::filesystem::path(buf)});
+}
+
+void setSourcePaths(std::vector<std::filesystem::path> paths) {
+    g_chosenPaths = std::move(paths);
+    std::error_code ec;
+    std::wstring info = g_chosenPaths.size() > 1
+        ? std::to_wstring(g_chosenPaths.size()) + L" paths"
+        : (std::filesystem::is_directory(g_chosenPaths[0], ec) ? L"Folder: " : L"File: ") + g_chosenPaths[0].wstring();
+    SetWindowTextW(g_srcInfo, (info + L"   (pick a process to clear)").c_str());
+}
+
+void onDrop(HDROP drop) {
+    std::vector<std::filesystem::path> paths;
+    UINT n = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+    for (UINT i = 0; i < n; ++i) {
+        std::wstring p(DragQueryFileW(drop, i, nullptr, 0) + 1, L'\0');
+        p.resize(DragQueryFileW(drop, i, p.data(), (UINT)p.size()));
+        paths.push_back(std::move(p));
     }
+    DragFinish(drop);
+    if (paths.empty()) return;
+    setSourcePaths(std::move(paths));
+    SetWindowTextW(g_status, L"Dropped. Hit Scan.");
+}
+
+LRESULT CALLBACK dropFwd(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_DROPFILES) { onDrop((HDROP)wp); return 0; }
+    return DefSubclassProc(h, msg, wp, lp);
 }
 
 ur::Options gatherOptions() {
@@ -451,13 +477,13 @@ void doScan() {
     }
 
     uint32_t pid = 0;
-    std::wstring file = g_chosenFile;
-    if (file.empty()) {
+    std::vector<std::filesystem::path> paths = g_chosenPaths;
+    if (paths.empty()) {
         int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
         if (sel >= 0 && sel < (int)g_procsView.size()) pid = g_procsView[sel].pid;
     }
-    if (!pid && file.empty()) {
-        MessageBoxW(g_main, L"Choose a process or a file first.", L"StringRipper", MB_ICONINFORMATION);
+    if (!pid && paths.empty()) {
+        MessageBoxW(g_main, L"Choose a process, or drop files on the window.", L"StringRipper", MB_ICONINFORMATION);
         return;
     }
 
@@ -466,14 +492,14 @@ void doScan() {
     setScanningUi(true);
     SetWindowTextW(g_status, L"Scanning...");
 
-    std::thread([o, pid, file]() {
+    std::thread([o, pid, paths]() {
         auto* result = new std::vector<ur::Group>();
         bool denied = false, needsElev = false;
         auto t0 = std::chrono::steady_clock::now();
         try {
             ur::Detector det(o);
             if (pid) *result = scanProcess(det, pid, [] { return g_cancelFlag.load(); }, denied, needsElev);
-            else *result = scanPaths(det, {std::filesystem::path(file)});
+            else *result = scanPaths(det, paths);
         } catch (...) {}
         g_elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - t0).count();
@@ -627,7 +653,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             0, 0, 0, 0, hwnd, (HMENU)ID_SOURCE, nullptr, nullptr);
         g_refresh = mkButton(hwnd, L"Refresh", ID_REFRESH);
         g_file = mkButton(hwnd, L"File...", ID_FILE);
-        g_srcInfo = mkStatic(hwnd, L"No file chosen; scanning the selected process.");
+        g_srcInfo = mkStatic(hwnd, L"Drop files or folders on the window, or scan the selected process.");
 
         g_secFind = mkStatic(hwnd, L"WHAT TO FIND");
         g_modeUrl = mkButton(hwnd, L"URLs", ID_MODE_URL, BS_AUTORADIOBUTTON | WS_GROUP);
@@ -691,6 +717,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         BOOL dark = TRUE;
         DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
 
+        /* drop */
+        for (HWND h : {hwnd, g_results}) {
+            DragAcceptFiles(h, TRUE);
+            for (int m : {WM_DROPFILES, WM_COPYDATA, 0x0049 /*WM_COPYGLOBALDATA*/})
+                ChangeWindowMessageFilterEx(h, (UINT)m, MSGFLT_ALLOW, nullptr);
+        }
+        SetWindowSubclass(g_results, dropFwd, 0, 0);
+
         refreshProcesses();
         updateModeVisibility();
         if (g_autoRipPid) {
@@ -753,7 +787,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case ID_SOURCE:
             if (HIWORD(wp) == CBN_SELCHANGE) {
-                g_chosenFile.clear();
+                g_chosenPaths.clear();
                 int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
                 if (sel >= 0 && sel < (int)g_procsView.size())
                     SetWindowTextW(g_srcInfo, (L"Scanning process: " + widen(g_procsView[sel].name) +
@@ -761,6 +795,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
         }
+        return 0;
+    case WM_DROPFILES:
+        onDrop((HDROP)wp);
         return 0;
     case WM_APP_DONE:
         onDone((std::vector<ur::Group>*)lp);
