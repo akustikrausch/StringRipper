@@ -25,14 +25,9 @@ The C/C++ reads like a veteran demoscene coder wrote it. Non-negotiable.
 - No abstraction for its own sake. Three plain lines beat a premature helper.
 
 ## Commits
-- Terse, lowercase, one line. `lto, terse about` not a paragraph.
-- A commit that belongs to a ticket ends with `Refs akustikrausch/StringRipper#NN`.
-  Doc-only and build plumbing carry no footer.
-- No tool credits, no AI attribution. Not in commits, not in tickets, not in PRs.
-
-## Tickets
-- Same voice as the commits: terse, lowercase, no prose, no status theatre.
-- Title says the symptom, body says the cause and the fix. Nothing else.
+- Terse, lowercase, one line. No body, no ticket refs, no tool credits.
+  `lto, terse about` not a paragraph.
+- No issue tracker on this repo. No tickets, no AI attribution, anywhere.
 
 ## Performance
 - FXChainPlayer rule, and it holds here: performance is king. Paint and scan
