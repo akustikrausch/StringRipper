@@ -19,6 +19,7 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <dwmapi.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 #include <atomic>
@@ -36,6 +37,7 @@
 #include "scan_driver.hpp"
 #include "file_read.hpp"
 #include "audio/rip_backend.h"
+#include "version.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -43,6 +45,7 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -51,7 +54,7 @@ name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #ifndef STRINGRIPPER_VERSION
-#define STRINGRIPPER_VERSION "1.0.3"
+#define STRINGRIPPER_VERSION SR_VER_STR
 #endif
 #ifndef STRINGRIPPER_BUILD
 #define STRINGRIPPER_BUILD 0
@@ -75,6 +78,11 @@ static std::wstring widen(const std::string& s) {
     std::wstring w(static_cast<std::size_t>(n), L'\0');
     ::MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
     return w;
+}
+
+static std::string lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    return s;
 }
 
 // ---------------------------------------------------------------- shared text
@@ -226,7 +234,7 @@ enum : int {
     ID_SEARCH = 1000, ID_SOURCE, ID_REFRESH, ID_FILE, ID_MODE_URL, ID_MODE_REGEX,
     ID_ENC_ASCII, ID_ENC_UTF16, ID_ENC_B64, ID_ENC_HEX,
     ID_P_EMAIL, ID_P_IPV4, ID_P_IPV6, ID_P_GUID, ID_P_APIKEY, ID_P_PATH,
-    ID_CUSTOM, ID_SCAN, ID_CANCEL, ID_RESULTS, ID_COPY, ID_SAVE, ID_EDITOR, ID_ABOUT
+    ID_CUSTOM, ID_SCAN, ID_CANCEL, ID_RESULTS, ID_COPY, ID_SAVE, ID_EDITOR, ID_ABOUT, ID_FILTER
 };
 constexpr UINT WM_APP_DONE = WM_APP + 1;
 
@@ -241,7 +249,7 @@ HWND g_secFind, g_modeUrl, g_modeRegex, g_urlHint;
 HWND g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel, g_custom;
 HWND g_secDecode, g_ascii, g_utf16, g_b64, g_hex;
 HWND g_scan, g_cancel, g_status;
-HWND g_secResults, g_results, g_copy, g_save, g_editor, g_about;
+HWND g_secResults, g_filter, g_results, g_copy, g_save, g_editor, g_about;
 HFONT g_font = nullptr, g_fontHdr = nullptr;
 HBRUSH g_bgBrush = nullptr, g_bg2Brush = nullptr;
 
@@ -251,6 +259,8 @@ std::atomic<bool> g_cancelFlag{false};
 std::atomic<bool> g_scanning{false};
 std::atomic<long long> g_elapsedMs{0};
 std::vector<ur::Group> g_lastResults;
+std::vector<ur::Group> g_viewResults;
+std::wstring g_statusFull;
 ur::Mode g_lastMode = ur::Mode::Urls;
 std::vector<std::filesystem::path> g_chosenPaths;
 uint32_t g_autoRipPid = 0;
@@ -303,14 +313,10 @@ void fillCombo() {
 void applyProcFilter() {
     wchar_t q[128] = L"";
     GetWindowTextW(g_search, q, 128);
-    std::string query = narrow(q);
-    std::transform(query.begin(), query.end(), query.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    std::string query = lower(narrow(q));
     g_procsView.clear();
     for (const auto& p : g_procsAll) {
-        if (query.empty()) { g_procsView.push_back(p); continue; }
-        std::string name = p.name;
-        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-        if (name.find(query) != std::string::npos) g_procsView.push_back(p);
+        if (query.empty() || lower(p.name).find(query) != std::string::npos) g_procsView.push_back(p);
     }
     fillCombo();
 }
@@ -437,17 +443,38 @@ void populateResults(const std::vector<ur::Group>& groups) {
     }
 }
 
+void applyResultFilter() {
+    wchar_t q[256] = L"";
+    GetWindowTextW(g_filter, q, 256);
+    std::string query = lower(narrow(q));
+    g_viewResults.clear();
+    for (const auto& g : g_lastResults) {
+        if (query.empty() || lower(g.name).find(query) != std::string::npos) { g_viewResults.push_back(g); continue; }
+        ur::Group hit;
+        hit.name = g.name;
+        for (const auto& f : g.items)
+            if (lower(f.value).find(query) != std::string::npos) hit.items.push_back(f);
+        if (!hit.items.empty()) g_viewResults.push_back(std::move(hit));
+    }
+    populateResults(g_viewResults);
+    enableResultActions(!g_viewResults.empty());
+    if (query.empty()) { SetWindowTextW(g_status, g_statusFull.c_str()); return; }
+    wchar_t msg[128];
+    _snwprintf_s(msg, _TRUNCATE, L"%zu of %zu results   (filtered)",
+                 ur::countFindings(g_viewResults), ur::countFindings(g_lastResults));
+    SetWindowTextW(g_status, msg);
+}
+
 void onDone(std::vector<ur::Group>* groups) {
     g_lastResults = std::move(*groups);
     delete groups;
-    populateResults(g_lastResults);
     wchar_t msg[256];
     _snwprintf_s(msg, _TRUNCATE, L"%zu results in %zu groups, sorted Z to A   (%.2f s)%s",
                  ur::countFindings(g_lastResults), g_lastResults.size(),
                  g_elapsedMs.load() / 1000.0, g_cancelFlag ? L"  (cancelled)" : L"");
-    SetWindowTextW(g_status, msg);
+    g_statusFull = msg;
+    applyResultFilter();
     setScanningUi(false);
-    enableResultActions(!g_lastResults.empty());
     if (g_scanDenied) {
         if (g_scanNeedsElev && g_scanPid) {
             if (MessageBoxW(g_main, L"This process runs with higher rights. Relaunch StringRipper as administrator to scan it?",
@@ -490,6 +517,7 @@ void doScan() {
     g_cancelFlag = false;
     g_scanPid = pid;
     setScanningUi(true);
+    SetWindowTextW(g_filter, L"");
     SetWindowTextW(g_status, L"Scanning...");
 
     std::thread([o, pid, paths]() {
@@ -532,7 +560,7 @@ void copySelected() {
 }
 
 void saveAsTxt() {
-    if (g_lastResults.empty()) return;
+    if (g_viewResults.empty()) return;
     wchar_t buf[4096] = L"urlripper-results.txt";
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
@@ -543,17 +571,17 @@ void saveAsTxt() {
     ofn.lpstrDefExt = L"txt";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER;
     if (::GetSaveFileNameW(&ofn)) {
-        if (!writeTextFile(buf, resultsToText(g_lastResults, g_lastMode)))
+        if (!writeTextFile(buf, resultsToText(g_viewResults, g_lastMode)))
             MessageBoxW(g_main, L"Could not write the file.", L"StringRipper", MB_ICONERROR);
     }
 }
 
 void sendToEditor() {
-    if (g_lastResults.empty()) return;
+    if (g_viewResults.empty()) return;
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
     std::wstring p = std::wstring(tmp) + L"StringRipper-" + std::to_wstring(GetTickCount64()) + L".txt";
-    if (!writeTextFile(p, resultsToText(g_lastResults, g_lastMode))) {
+    if (!writeTextFile(p, resultsToText(g_viewResults, g_lastMode))) {
         MessageBoxW(g_main, L"Could not write the temp file.", L"StringRipper", MB_ICONERROR);
         return;
     }
@@ -610,8 +638,9 @@ void layout(int cw, int ch) {
     y += rh + 2 + gap;
 
     // RESULTS
-    MoveWindow(g_secResults, m, y, 300, hh, TRUE);
-    y += hh + 3;
+    MoveWindow(g_secResults, m, y + 5, 70, hh, TRUE);
+    MoveWindow(g_filter, m + 76, y, cw - m * 2 - 76, rh, TRUE);
+    y += rh + 3;
     int bottom = ch - m - rh;
     int listH = (bottom - gap) - y;
     if (listH < 60) listH = 60;
@@ -687,6 +716,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_status = mkStatic(hwnd, L"Ready.");
 
         g_secResults = mkStatic(hwnd, L"RESULTS");
+        g_filter = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)ID_FILTER, nullptr, nullptr);
+        SendMessageW(g_filter, EM_SETCUEBANNER, TRUE, (LPARAM)L"Filter results by name...");
         g_results = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
             0, 0, 0, 0, hwnd, (HMENU)ID_RESULTS, nullptr, nullptr);
@@ -708,11 +740,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         for (HWND h : {g_search, g_source, g_refresh, g_file, g_srcInfo, g_modeUrl, g_modeRegex, g_urlHint,
                        g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel,
-                       g_custom, g_ascii, g_utf16, g_b64, g_hex, g_scan, g_cancel, g_status, g_results,
-                       g_copy, g_save, g_editor, g_about})
+                       g_custom, g_ascii, g_utf16, g_b64, g_hex, g_scan, g_cancel, g_status, g_filter,
+                       g_results, g_copy, g_save, g_editor, g_about})
             setFont(h, g_font);
         for (HWND h : {g_secSource, g_secFind, g_secDecode, g_secResults})
             setFont(h, g_fontHdr);
+
+        for (HWND h : {g_modeUrl, g_modeRegex, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath,
+                       g_ascii, g_utf16, g_b64, g_hex})
+            SetWindowTheme(h, L"", L"");
 
         BOOL dark = TRUE;
         DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
@@ -773,6 +809,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case ID_SEARCH: if (HIWORD(wp) == EN_CHANGE) applyProcFilter(); break;
+        case ID_FILTER: if (HIWORD(wp) == EN_CHANGE) applyResultFilter(); break;
         case ID_REFRESH: refreshProcesses(); break;
         case ID_FILE: pickFile(); break;
         case ID_MODE_URL: case ID_MODE_REGEX: updateModeVisibility(); relayout(hwnd); break;

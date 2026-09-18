@@ -21,14 +21,18 @@ $vcvars = Join-Path $inst "VC\Auxiliary\Build\vcvars64.bat"
 if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found. Install the MSVC C++ build tools." }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $root "bin") | Out-Null
-$src = Join-Path $root "src\main.cpp"
+$srcdir = Join-Path $root "src"
+$src = Join-Path $srcdir "main.cpp"
+$rc  = Join-Path $srcdir "StringRipper.rc"
 $out = Join-Path $root "bin\StringRipper.exe"
 $tmp = $env:TEMP
+$res = Join-Path $tmp "StringRipper.res"
 $build = Get-Date -Format "yyyyMMddHHmm"   # build number = build timestamp
 
-$cl = "cl /nologo /std:c++20 /EHsc /O2 /Gy /GL /MT /W3 /DUNICODE /D_UNICODE /DSTRINGRIPPER_BUILD=$build /I `"$fxsrc`" `"$src`" `"$rb`" /Fe:`"$out`" /link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /MANIFEST:EMBED"
+$rcc = "rc /nologo /I `"$srcdir`" /fo `"$res`" `"$rc`""
+$cl = "cl /nologo /std:c++20 /EHsc /O2 /Gy /GL /MT /W3 /DUNICODE /D_UNICODE /DSTRINGRIPPER_BUILD=$build /I `"$fxsrc`" `"$src`" `"$rb`" `"$res`" /Fe:`"$out`" /link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /MANIFEST:EMBED"
 # cd into a local temp dir so object files do not need a UNC-unfriendly /Fo.
-cmd /c "call `"$vcvars`" >nul 2>&1 && cd /d `"$tmp`" && $cl"
+cmd /c "call `"$vcvars`" >nul 2>&1 && cd /d `"$tmp`" && $rcc && $cl"
 if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }
 Write-Host "built $out  (reused FXChainPlayer ripper from $fxsrc)"
 Get-Item $out | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize | Out-String

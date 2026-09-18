@@ -23,9 +23,11 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 add_executable(StringRipper WIN32
   src/main.cpp
   "${FX_SRC}/audio/rip_backend_win32.cpp"    # reused FXChainPlayer ripper backend
+  src/StringRipper.rc
   src/scan_core.hpp
   src/scan_driver.hpp
-  src/file_read.hpp)
+  src/file_read.hpp
+  src/version.h)
 
 target_include_directories(StringRipper PRIVATE "${FX_SRC}")
 target_compile_definitions(StringRipper PRIVATE UNICODE _UNICODE)

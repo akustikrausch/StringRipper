@@ -1,0 +1,31 @@
+#include <windows.h>
+#include "version.h"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    SR_VER
+PRODUCTVERSION SR_VER
+FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+FILEFLAGS      0
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_APP
+FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Akustikrausch"
+            VALUE "FileDescription",  "StringRipper - rips URLs and regex matches out of processes and files"
+            VALUE "FileVersion",      SR_VER_STR
+            VALUE "InternalName",     "StringRipper"
+            VALUE "LegalCopyright",   "(c) 2026 Andreas Wendorf, MIT license"
+            VALUE "OriginalFilename", "StringRipper.exe"
+            VALUE "ProductName",      "StringRipper"
+            VALUE "ProductVersion",   SR_VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
