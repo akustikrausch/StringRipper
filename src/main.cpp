@@ -263,6 +263,7 @@ HWND g_secResults, g_filter, g_results, g_copy, g_save, g_editor, g_about;
 HFONT g_font = nullptr, g_fontHdr = nullptr, g_fontMono = nullptr;
 int g_dpi = 96;
 RECT g_segRect{};
+RECT g_fields[4]{};
 int S(int v) { return MulDiv(v, g_dpi, 96); }
 HBRUSH g_bgBrush = nullptr, g_bg2Brush = nullptr;
 
@@ -347,7 +348,7 @@ void drawPush(const DRAWITEMSTRUCT* d) {
         ink = dis ? kText3 : kText;
     }
     FillRect(d->hDC, &d->rcItem, g_bgBrush);
-    roundRect(d->hDC, d->rcItem, S(10), fill, bord);
+    roundRect(d->hDC, d->rcItem, S(20), fill, bord);
     wchar_t t[64] = L"";
     GetWindowTextW(d->hwndItem, t, 64);
     inkText(d->hDC, t, d->rcItem, g_font, ink, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
@@ -371,7 +372,7 @@ void drawMode(const DRAWITEMSTRUCT* d) {
     DeleteObject(b);
     wchar_t t[64] = L"";
     GetWindowTextW(d->hwndItem, t, 64);
-    if (on) roundRect(d->hDC, d->rcItem, S(8), kAccent, kAccent);
+    if (on) roundRect(d->hDC, d->rcItem, S(16), kAccent, kAccent);
     inkText(d->hDC, t, d->rcItem, g_font, on ? RGB(0xFF, 0xFF, 0xFF) : kText2,
             DT_SINGLELINE | DT_CENTER | DT_VCENTER);
 }
@@ -398,14 +399,15 @@ void drawCombo(const DRAWITEMSTRUCT* d) {
     SelectObject(d->hDC, of);
 }
 
-void frame(HDC dc, HWND c, HPEN pen) {
+void frame(HDC dc, HWND c, HPEN pen, int rad) {
     if (!IsWindowVisible(c)) return;
     RECT r; GetWindowRect(c, &r);
     MapWindowPoints(nullptr, g_main, (POINT*)&r, 2);
     InflateRect(&r, 1, 1);
     HPEN op = (HPEN)SelectObject(dc, pen);
     HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    Rectangle(dc, r.left, r.top, r.right, r.bottom);
+    if (rad) RoundRect(dc, r.left, r.top, r.right, r.bottom, rad * 2 + S(4), rad * 2 + S(4));
+    else Rectangle(dc, r.left, r.top, r.right, r.bottom);
     SelectObject(dc, ob); SelectObject(dc, op);
 }
 void setFont(HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); }
@@ -843,11 +845,15 @@ void layout(int cw, int ch) {
     // SOURCE
     MoveWindow(g_secSource, m, y, S(200), hh, TRUE); y += hh + hg;
     int rw = textW(g_refresh, g_font) + S(26), fw = textW(g_file, g_font) + S(26);
-    MoveWindow(g_search, m, y, cw - m * 2 - rw - fw - sp * 2, rh, TRUE);
+    int sw2 = cw - m * 2 - rw - fw - sp * 2;
+    g_fields[0] = { m, y, m + sw2, y + rh };
+    MoveWindow(g_search, m + S(6), y + S(4), sw2 - S(12), rh - S(8), TRUE);
     MoveWindow(g_refresh, right - fw - rw - sp, y, rw, rh, TRUE);
     MoveWindow(g_file, right - fw, y, fw, rh, TRUE);
     y += rh + S(5);
-    MoveWindow(g_source, m, y, cw - m * 2, S(360), TRUE);   // 360 = dropdown height
+    MoveWindow(g_source, m + S(6), y + S(4), cw - m * 2 - S(12), S(360), TRUE);   // 360 = dropdown height
+    { RECT cr2; GetWindowRect(g_source, &cr2); MapWindowPoints(nullptr, g_main, (POINT*)&cr2, 2);
+      InflateRect(&cr2, S(6), S(4)); g_fields[1] = cr2; }
     y += rh + hg;
     MoveWindow(g_srcInfo, m, y, cw - m * 2, lh, TRUE);
     y += lh + gap;
@@ -867,7 +873,8 @@ void layout(int cw, int ch) {
     flow({g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath}, m + lw + sp, dy, S(24));
     const int cy = dy + rh + hg;
     MoveWindow(g_customLabel, m, cy + S(4), lw, lh, TRUE);
-    MoveWindow(g_custom, m + lw + sp, cy, right - m - lw - sp, rh, TRUE);
+    g_fields[2] = { m + lw + sp, cy, right, cy + rh };
+    MoveWindow(g_custom, m + lw + sp + S(6), cy + S(4), right - m - lw - sp - S(12), rh - S(8), TRUE);
     y = regex ? (cy + rh + gap) : (dy + lh + gap);
 
     // DECODE
@@ -883,7 +890,8 @@ void layout(int cw, int ch) {
     // RESULTS
     int sw = textW(g_secResults, g_fontHdr, S(2)) + sp;
     MoveWindow(g_secResults, m, y + S(6), sw, hh, TRUE);
-    MoveWindow(g_filter, m + sw + sp, y, right - m - sw - sp, rh, TRUE);
+    g_fields[3] = { m + sw + sp, y, right, y + rh };
+    MoveWindow(g_filter, m + sw + sp + S(6), y + S(4), right - m - sw - sp - S(12), rh - S(8), TRUE);
     y += rh + hg;
 
     int bottom = ch - m - rh;
@@ -895,6 +903,7 @@ void layout(int cw, int ch) {
     flow({g_copy, g_save, g_editor}, m, bottom, S(26));
     int aw = textW(g_about, g_font) + S(26);
     MoveWindow(g_about, right - aw, bottom, aw, rh, TRUE);
+
 }
 
 void fitColumns() {
@@ -1084,9 +1093,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
-        roundRect(dc, g_segRect, S(10), kBg, kBSub);
+        roundRect(dc, g_segRect, S(20), kBg, kBSub);
+        for (int i = 0; i < 4; ++i) {
+            if (i == 2 && !IsWindowVisible(g_custom)) continue;
+            roundRect(dc, g_fields[i], S(20), kBg2, kBSub);
+        }
         HPEN pen = CreatePen(PS_SOLID, 1, kBSub);
-        for (HWND c : {g_search, g_source, g_custom, g_filter, g_results}) frame(dc, c, pen);
+        frame(dc, g_results, pen, 0);
         DeleteObject(pen);
         EndPaint(hwnd, &ps);
         return 0;
@@ -1180,7 +1193,7 @@ int runGui(HINSTANCE hInst) {
     RegisterClassExW(&wc);
 
     g_main = CreateWindowExW(0, wc.lpszClassName, L"StringRipper " STRINGRIPPER_VERSION L" by Akustikrausch",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 1000, 760,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 1000, 760,
         nullptr, nullptr, hInst, nullptr);
     if (!g_main) return 1;
     ShowWindow(g_main, SW_SHOW);
