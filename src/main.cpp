@@ -242,6 +242,7 @@ const COLORREF kBg = RGB(0x12, 0x12, 0x1A);
 const COLORREF kBg2 = RGB(0x1A, 0x1A, 0x24);
 const COLORREF kText = RGB(0xE8, 0xE8, 0xF0);
 const COLORREF kText3 = RGB(0x78, 0x78, 0xA0);
+const COLORREF kGroup = RGB(0x8C, 0xA8, 0xFF);
 
 HWND g_main = nullptr;
 HWND g_secSource, g_search, g_source, g_refresh, g_file, g_srcInfo;
@@ -365,9 +366,46 @@ void onDrop(HDROP drop) {
     SetWindowTextW(g_status, L"Dropped. Hit Scan.");
 }
 
-LRESULT CALLBACK dropFwd(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+/*--- group headers ---*/
+LRESULT CALLBACK resultsSub(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
     if (msg == WM_DROPFILES) { onDrop((HDROP)wp); return 0; }
-    return DefSubclassProc(h, msg, wp, lp);
+    LRESULT res = DefSubclassProc(h, msg, wp, lp);
+    if (msg != WM_PAINT || g_viewResults.empty()) return res;
+
+    RECT cr; GetClientRect(h, &cr);
+    const int n = (int)g_viewResults.size();
+    int lo = 0, hi = n - 1, first = n;
+    while (lo <= hi) {
+        int mid = (lo + hi) >> 1;
+        RECT r{};
+        ListView_GetGroupRect(h, mid, LVGGR_HEADER, &r);
+        if (r.bottom > cr.top) { first = mid; hi = mid - 1; } else lo = mid + 1;
+    }
+
+    HDC dc = GetDC(h);
+    HFONT of = (HFONT)SelectObject(dc, g_fontHdr);
+    HPEN pen = CreatePen(PS_SOLID, 1, kText3), op = (HPEN)SelectObject(dc, pen);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, kGroup);
+    for (int i = first; i < n; ++i) {
+        RECT gr{};
+        ListView_GetGroupRect(h, i, LVGGR_HEADER, &gr);
+        if (gr.top >= cr.bottom) break;
+        const ur::Group& g = g_viewResults[i];
+        std::wstring t = widen(g.name) + L"  (" + std::to_wstring(g.items.size()) + L")";
+        SIZE sz{};
+        GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &sz);
+        RECT tr = gr; tr.left += 4;
+        FillRect(dc, &gr, g_bg2Brush);
+        DrawTextW(dc, t.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        int y = (gr.top + gr.bottom) / 2;
+        MoveToEx(dc, tr.left + sz.cx + 8, y, nullptr);
+        LineTo(dc, gr.right - 4, y);
+    }
+    SelectObject(dc, op); DeleteObject(pen);
+    SelectObject(dc, of);
+    ReleaseDC(h, dc);
+    return res;
 }
 
 ur::Options gatherOptions() {
@@ -759,7 +797,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (int m : {WM_DROPFILES, WM_COPYDATA, 0x0049 /*WM_COPYGLOBALDATA*/})
                 ChangeWindowMessageFilterEx(h, (UINT)m, MSGFLT_ALLOW, nullptr);
         }
-        SetWindowSubclass(g_results, dropFwd, 0, 0);
+        SetWindowSubclass(g_results, resultsSub, 0, 0);
 
         refreshProcesses();
         updateModeVisibility();

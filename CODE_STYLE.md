@@ -25,8 +25,20 @@ The C/C++ reads like a veteran demoscene coder wrote it. Non-negotiable.
 - No abstraction for its own sake. Three plain lines beat a premature helper.
 
 ## Commits
-- Terse, lowercase, one line. No body, no ticket refs, no tool credits.
-  `lto, terse about` not a paragraph.
+- Terse, lowercase, one line. `lto, terse about` not a paragraph.
+- A commit that belongs to a ticket ends with `Refs akustikrausch/StringRipper#NN`.
+  Doc-only and build plumbing carry no footer.
+- No tool credits, no AI attribution. Not in commits, not in tickets, not in PRs.
+
+## Tickets
+- Same voice as the commits: terse, lowercase, no prose, no status theatre.
+- Title says the symptom, body says the cause and the fix. Nothing else.
+
+## Performance
+- FXChainPlayer rule, and it holds here: performance is king. Paint and scan
+  paths stay O(visible) or O(work), never O(everything). 20k groups repaint
+  from a binary search, not a sweep.
+- Measure both sides. A number beats an adjective.
 
 ## Size and build
 - No crinkler, no 32 KB target: this is a native Win32 tool, not an intro. It
@@ -36,3 +48,5 @@ The C/C++ reads like a veteran demoscene coder wrote it. Non-negotiable.
   no DLLs. Manifest is embedded (`/MANIFEST:EMBED`): the bare exe needs
   comctl32 v6 for the grouped list.
 - The reader is compiled from FXChainPlayer, not vendored (see README).
+- One version, `src/version.h`. main.cpp and the .rc read it, nothing else
+  hardcodes a version string.
