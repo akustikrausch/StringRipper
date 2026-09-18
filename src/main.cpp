@@ -242,6 +242,7 @@ constexpr UINT WM_APP_DONE = WM_APP + 1;
 const COLORREF kBg = RGB(0x12, 0x12, 0x1A);
 const COLORREF kBg2 = RGB(0x1A, 0x1A, 0x24);
 const COLORREF kBg3 = RGB(0x22, 0x22, 0x2E);
+const COLORREF kCard = RGB(0x16, 0x1C, 0x28);
 const COLORREF kText = RGB(0xE8, 0xE8, 0xF0);
 const COLORREF kText2 = RGB(0x98, 0x98, 0xB0);
 const COLORREF kText3 = RGB(0x78, 0x78, 0xA0);
@@ -264,6 +265,7 @@ HFONT g_font = nullptr, g_fontHdr = nullptr, g_fontMono = nullptr;
 int g_dpi = 96;
 RECT g_segRect{};
 RECT g_fields[4]{};
+RECT g_listCard{};
 int S(int v) { return MulDiv(v, g_dpi, 96); }
 HBRUSH g_bgBrush = nullptr, g_bg2Brush = nullptr;
 
@@ -399,17 +401,6 @@ void drawCombo(const DRAWITEMSTRUCT* d) {
     SelectObject(d->hDC, of);
 }
 
-void frame(HDC dc, HWND c, HPEN pen, int rad) {
-    if (!IsWindowVisible(c)) return;
-    RECT r; GetWindowRect(c, &r);
-    MapWindowPoints(nullptr, g_main, (POINT*)&r, 2);
-    InflateRect(&r, 1, 1);
-    HPEN op = (HPEN)SelectObject(dc, pen);
-    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    if (rad) RoundRect(dc, r.left, r.top, r.right, r.bottom, rad * 2 + S(4), rad * 2 + S(4));
-    else Rectangle(dc, r.left, r.top, r.right, r.bottom);
-    SelectObject(dc, ob); SelectObject(dc, op);
-}
 void setFont(HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); }
 
 int textW(HWND h, HFONT f, int track = 0) {
@@ -541,7 +532,7 @@ LRESULT CALLBACK resultsSub(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
         if (cd->hdr.code == NM_CUSTOMDRAW && cd->hdr.hwndFrom == ListView_GetHeader(h)) {
             if (cd->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
             if (cd->dwDrawStage != CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
-            HBRUSH b = CreateSolidBrush(kBg2);
+            HBRUSH b = CreateSolidBrush(kCard);
             FillRect(cd->hdc, &cd->rc, b);
             DeleteObject(b);
             wchar_t t[64] = L"";
@@ -577,6 +568,15 @@ LRESULT CALLBACK resultsSub(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
     }
 
     HDC dc = GetDC(h);
+    RECT hr{};
+    GetClientRect(ListView_GetHeader(h), &hr);
+    HBRUSH rule = CreateSolidBrush(kCard);
+    for (int c = 0, x = 0; c < 2; ++c) {
+        x += ListView_GetColumnWidth(h, c);
+        RECT rr{ x - 2, hr.bottom, x + 2, cr.bottom };
+        FillRect(dc, &rr, rule);
+    }
+    DeleteObject(rule);
     HFONT of = (HFONT)SelectObject(dc, g_fontHdr);
     HPEN pen = CreatePen(PS_SOLID, 1, kBSub), op = (HPEN)SelectObject(dc, pen);
     SetBkMode(dc, TRANSPARENT);
@@ -586,28 +586,36 @@ LRESULT CALLBACK resultsSub(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
         ListView_GetGroupRect(h, i, LVGGR_HEADER, &gr);
         if (gr.top >= cr.bottom) break;
         const ur::Group& g = g_viewResults[i];
-        std::wstring t = widen(g.name) + L"  (" + std::to_wstring(g.items.size()) + L")";
+        FillRect(dc, &gr, g_bgBrush);
+        MoveToEx(dc, gr.left, gr.bottom - 1, nullptr);
+        LineTo(dc, gr.right, gr.bottom - 1);
+
+        std::wstring t = widen(g.name);
+        RECT tr = gr; tr.left += S(12);
+        HFONT om = (HFONT)SelectObject(dc, g_fontMono);
         SIZE sz{};
         GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &sz);
-        RECT tr = gr; tr.left += 4;
-        FillRect(dc, &gr, g_bg2Brush);
+        SetTextColor(dc, kText);
         DrawTextW(dc, t.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-        int y = (gr.top + gr.bottom) / 2;
-        MoveToEx(dc, tr.left + sz.cx + 8, y, nullptr);
-        LineTo(dc, gr.right - 4, y);
+        SelectObject(dc, om);
+
+        std::wstring cnt = std::to_wstring(g.items.size());
+        SIZE cs{};
+        HFONT ou = (HFONT)SelectObject(dc, g_font);
+        GetTextExtentPoint32W(dc, cnt.c_str(), (int)cnt.size(), &cs);
+        SelectObject(dc, ou);
+        const int ch = S(20);
+        RECT chip{ tr.left + sz.cx + S(10), (gr.top + gr.bottom - ch) / 2, 0, 0 };
+        chip.right = chip.left + cs.cx + S(14);
+        chip.bottom = chip.top + ch;
+        if (chip.right < gr.right - S(8)) {
+            roundRect(dc, chip, ch, kBg, kBDef);
+            inkText(dc, cnt.c_str(), chip, g_font, kText2, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        }
     }
     SelectObject(dc, op); DeleteObject(pen);
     SelectObject(dc, of);
 
-    RECT hr{};
-    GetClientRect(ListView_GetHeader(h), &hr);
-    HBRUSH rule = CreateSolidBrush(kBg2);
-    for (int c = 0, x = 0; c < 2; ++c) {
-        x += ListView_GetColumnWidth(h, c);
-        RECT rr{ x - 2, hr.bottom, x + 2, cr.bottom };
-        FillRect(dc, &rr, rule);
-    }
-    DeleteObject(rule);
     ReleaseDC(h, dc);
     return res;
 }
@@ -897,7 +905,8 @@ void layout(int cw, int ch) {
     int bottom = ch - m - rh;
     int listH = (bottom - gap) - y;
     if (listH < S(60)) listH = S(60);
-    MoveWindow(g_results, m, y, cw - m * 2, listH, TRUE);
+    g_listCard = { m, y, right, y + listH };
+    MoveWindow(g_results, m + S(7), y + S(7), cw - m * 2 - S(14), listH - S(14), TRUE);
     fitColumns();
 
     flow({g_copy, g_save, g_editor}, m, bottom, S(26));
@@ -992,8 +1001,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             0, 0, 0, 0, hwnd, (HMENU)ID_RESULTS, nullptr, nullptr);
         ListView_SetExtendedListViewStyle(g_results, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
         SetWindowTheme(g_results, L"DarkMode_Explorer", nullptr);
-        ListView_SetBkColor(g_results, kBg2);
-        ListView_SetTextBkColor(g_results, kBg2);
+        ListView_SetBkColor(g_results, kCard);
+        ListView_SetTextBkColor(g_results, kCard);
         ListView_SetTextColor(g_results, kText);
         LVCOLUMNW col{};
         col.mask = LVCF_TEXT | LVCF_WIDTH;
@@ -1098,9 +1107,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (i == 2 && !IsWindowVisible(g_custom)) continue;
             roundRect(dc, g_fields[i], S(20), kBg2, kBSub);
         }
-        HPEN pen = CreatePen(PS_SOLID, 1, kBSub);
-        frame(dc, g_results, pen, 0);
-        DeleteObject(pen);
+        roundRect(dc, g_listCard, S(26), kCard, kBSub);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -1158,7 +1165,31 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
         if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) return CDRF_NOTIFYSUBITEMDRAW;
         if (cd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
-            if (cd->iSubItem == 1) { cd->clrText = kText2; return CDRF_NEWFONT; }
+            if (cd->iSubItem == 0) { SelectObject(cd->nmcd.hdc, g_fontMono); return CDRF_NEWFONT; }
+            if (cd->iSubItem == 1) {
+                HWND lv = cd->nmcd.hdr.hwndFrom;
+                const int row = (int)cd->nmcd.dwItemSpec;
+                wchar_t t[32] = L"";
+                ListView_GetItemText(lv, row, 1, t, 32);
+                RECT r{};
+                ListView_GetSubItemRect(lv, row, 1, LVIR_BOUNDS, &r);
+                HDC hdc = cd->nmcd.hdc;
+                HBRUSH b = CreateSolidBrush(kCard);
+                FillRect(hdc, &r, b);
+                DeleteObject(b);
+                if (!t[0]) return CDRF_SKIPDEFAULT;
+                HFONT of = (HFONT)SelectObject(hdc, g_font);
+                SIZE sz{};
+                GetTextExtentPoint32W(hdc, t, (int)wcslen(t), &sz);
+                SelectObject(hdc, of);
+                const int ch = S(20);
+                RECT chip{ r.left + S(6), (r.top + r.bottom - ch) / 2, 0, 0 };
+                chip.right = chip.left + sz.cx + S(14);
+                chip.bottom = chip.top + ch;
+                roundRect(hdc, chip, S(12), kBg3, kBg3);
+                inkText(hdc, t, chip, g_font, kText2, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                return CDRF_SKIPDEFAULT;
+            }
             if (cd->iSubItem == 2) {
                 SelectObject(cd->nmcd.hdc, g_fontMono);
                 cd->clrText = kText3;

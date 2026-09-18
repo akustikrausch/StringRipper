@@ -33,9 +33,14 @@ The C/C++ reads like a veteran demoscene coder wrote it. Non-negotiable.
 - The palette is the URL Ripper design canvas, not invented here: bg 12121A /
   1A1A24 / 22222E, ink E8E8F0 / 9898B0 / 7878A0, accent 6D5FE8 (hover 7D70F0,
   headers 94A3FF), borders 2A2A38 / 363648 / 4A4A62.
-- Its shapes too: pill chips for the toggles, a segmented control for the mode,
-  10px radii on the buttons, accent fill on the one primary action, mono for
-  paths and other machine text.
+- Its shapes too: pill chips for the toggles and the encoding column, a
+  segmented control for the mode, 10px radii on buttons and input fields, the
+  result list as a 13px card (161C28) with darker group bands, accent fill on
+  the one primary action, mono for URLs, paths and other machine text.
+- Common controls will not round themselves and a window region does not clip
+  their painting. The parent draws the rounded plate, the control sits inset
+  inside it. The window needs `WS_CLIPCHILDREN` or the background erase wipes
+  the owner-drawn children.
 - Dark or nothing. Anything the common controls paint light -- combo field,
   list header, push buttons, scrollbars -- is drawn here or re-themed.
 - Secondary ink stays at 6:1 or better on its background. Sample the pixels,
