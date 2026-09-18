@@ -30,9 +30,16 @@ The C/C++ reads like a veteran demoscene coder wrote it. Non-negotiable.
 - No issue tracker on this repo. No tickets, no AI attribution, anywhere.
 
 ## Look
+- The palette is the URL Ripper design canvas, not invented here: bg 12121A /
+  1A1A24 / 22222E, ink E8E8F0 / 9898B0 / 7878A0, accent 6D5FE8 (hover 7D70F0,
+  headers 94A3FF), borders 2A2A38 / 363648 / 4A4A62.
+- Its shapes too: pill chips for the toggles, a segmented control for the mode,
+  10px radii on the buttons, accent fill on the one primary action, mono for
+  paths and other machine text.
 - Dark or nothing. Anything the common controls paint light -- combo field,
   list header, push buttons, scrollbars -- is drawn here or re-themed.
-- Dim text stays at 7:1 on the background. Sample the pixels, don't eyeball it.
+- Secondary ink stays at 6:1 or better on its background. Sample the pixels,
+  don't eyeball it. The canvas t3 is below that: it is for machine text only.
 - Every metric goes through `S()`. The window is per-monitor DPI aware, so no
   raw pixel constants in the layout.
 
