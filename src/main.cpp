@@ -241,7 +241,12 @@ constexpr UINT WM_APP_DONE = WM_APP + 1;
 const COLORREF kBg = RGB(0x12, 0x12, 0x1A);
 const COLORREF kBg2 = RGB(0x1A, 0x1A, 0x24);
 const COLORREF kText = RGB(0xE8, 0xE8, 0xF0);
-const COLORREF kText3 = RGB(0x78, 0x78, 0xA0);
+const COLORREF kText3 = RGB(0xA8, 0xA8, 0xD0);
+const COLORREF kLine = RGB(0x3A, 0x3A, 0x52);
+const COLORREF kDim = RGB(0x6A, 0x6A, 0x8C);
+const COLORREF kBtn = RGB(0x24, 0x24, 0x32);
+const COLORREF kBtnHot = RGB(0x2E, 0x2E, 0x42);
+const COLORREF kBtnDown = RGB(0x16, 0x16, 0x20);
 const COLORREF kGroup = RGB(0x8C, 0xA8, 0xFF);
 
 HWND g_main = nullptr;
@@ -252,6 +257,8 @@ HWND g_secDecode, g_ascii, g_utf16, g_b64, g_hex;
 HWND g_scan, g_cancel, g_status;
 HWND g_secResults, g_filter, g_results, g_copy, g_save, g_editor, g_about;
 HFONT g_font = nullptr, g_fontHdr = nullptr;
+int g_dpi = 96;
+int S(int v) { return MulDiv(v, g_dpi, 96); }
 HBRUSH g_bgBrush = nullptr, g_bg2Brush = nullptr;
 
 std::vector<fxchain::RipProcess> g_procsAll;   // full enumeration
@@ -269,6 +276,7 @@ uint32_t g_scanPid = 0;
 bool g_scanDenied = false;
 bool g_scanNeedsElev = false;
 
+void applyFonts();
 void layout(int cw, int ch);
 void relayout(HWND hwnd);
 void setSourcePaths(std::vector<std::filesystem::path> paths);
@@ -281,7 +289,79 @@ HWND mkButton(HWND p, const wchar_t* t, int id, DWORD style = 0) {
     return CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
                            0, 0, 0, 0, p, (HMENU)(INT_PTR)id, nullptr, nullptr);
 }
+HWND mkPush(HWND p, const wchar_t* t, int id) { return mkButton(p, t, id, BS_OWNERDRAW); }
+
+void drawPush(const DRAWITEMSTRUCT* d) {
+    const bool dis = (d->itemState & ODS_DISABLED) != 0;
+    const bool down = (d->itemState & ODS_SELECTED) != 0;
+    const bool hot = (SendMessageW(d->hwndItem, BM_GETSTATE, 0, 0) & BST_HOT) != 0;
+    HBRUSH fill = CreateSolidBrush(dis ? kBg : (down ? kBtnDown : (hot ? kBtnHot : kBtn)));
+    FillRect(d->hDC, &d->rcItem, fill);
+    DeleteObject(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, (d->itemState & ODS_FOCUS) ? kGroup : kLine);
+    HPEN op = (HPEN)SelectObject(d->hDC, pen);
+    HGDIOBJ ob = SelectObject(d->hDC, GetStockObject(NULL_BRUSH));
+    Rectangle(d->hDC, d->rcItem.left, d->rcItem.top, d->rcItem.right, d->rcItem.bottom);
+    SelectObject(d->hDC, ob); SelectObject(d->hDC, op); DeleteObject(pen);
+    wchar_t t[64] = L"";
+    GetWindowTextW(d->hwndItem, t, 64);
+    HFONT of = (HFONT)SelectObject(d->hDC, g_font);
+    SetBkMode(d->hDC, TRANSPARENT);
+    SetTextColor(d->hDC, dis ? kDim : kText);
+    RECT r = d->rcItem;
+    DrawTextW(d->hDC, t, -1, &r, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+    SelectObject(d->hDC, of);
+}
+
+void drawCombo(const DRAWITEMSTRUCT* d) {
+    HBRUSH b = CreateSolidBrush((d->itemState & ODS_SELECTED) ? kBtnHot : kBg2);
+    FillRect(d->hDC, &d->rcItem, b);
+    DeleteObject(b);
+    if ((int)d->itemID < 0) return;
+    wchar_t t[256] = L"";
+    SendMessageW(d->hwndItem, CB_GETLBTEXT, d->itemID, (LPARAM)t);
+    HFONT of = (HFONT)SelectObject(d->hDC, g_font);
+    SetBkMode(d->hDC, TRANSPARENT);
+    SetTextColor(d->hDC, kText);
+    RECT r = d->rcItem; r.left += S(6);
+    DrawTextW(d->hDC, t, -1, &r, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    SelectObject(d->hDC, of);
+}
+
+void frame(HDC dc, HWND c, HPEN pen) {
+    if (!IsWindowVisible(c)) return;
+    RECT r; GetWindowRect(c, &r);
+    MapWindowPoints(nullptr, g_main, (POINT*)&r, 2);
+    InflateRect(&r, 1, 1);
+    HPEN op = (HPEN)SelectObject(dc, pen);
+    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Rectangle(dc, r.left, r.top, r.right, r.bottom);
+    SelectObject(dc, ob); SelectObject(dc, op);
+}
 void setFont(HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); }
+
+int textW(HWND h, HFONT f) {
+    wchar_t t[128] = L"";
+    GetWindowTextW(h, t, 128);
+    HDC dc = GetDC(h);
+    HFONT of = (HFONT)SelectObject(dc, f);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, t, (int)wcslen(t), &sz);
+    SelectObject(dc, of);
+    ReleaseDC(h, dc);
+    return sz.cx;
+}
+
+void makeFonts() {
+    if (g_font) DeleteObject(g_font);
+    if (g_fontHdr) DeleteObject(g_fontHdr);
+    g_font = CreateFontW(-S(15), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_fontHdr = CreateFontW(-S(12), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
+                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
 bool isChecked(HWND h) { return SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED; }
 
 void showAbout() {
@@ -369,6 +449,33 @@ void onDrop(HDROP drop) {
 /*--- group headers ---*/
 LRESULT CALLBACK resultsSub(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
     if (msg == WM_DROPFILES) { onDrop((HDROP)wp); return 0; }
+    if (msg == WM_NOTIFY) {
+        auto* cd = (NMCUSTOMDRAW*)lp;
+        if (cd->hdr.code == NM_CUSTOMDRAW && cd->hdr.hwndFrom == ListView_GetHeader(h)) {
+            if (cd->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+            if (cd->dwDrawStage != CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
+            HBRUSH b = CreateSolidBrush(kBg2);
+            FillRect(cd->hdc, &cd->rc, b);
+            DeleteObject(b);
+            wchar_t t[64] = L"";
+            HDITEMW hi{};
+            hi.mask = HDI_TEXT; hi.pszText = t; hi.cchTextMax = 64;
+            Header_GetItem(cd->hdr.hwndFrom, (int)cd->dwItemSpec, &hi);
+            HFONT of = (HFONT)SelectObject(cd->hdc, g_font);
+            SetBkMode(cd->hdc, TRANSPARENT);
+            SetTextColor(cd->hdc, kText3);
+            RECT tr = cd->rc; tr.left += S(6);
+            DrawTextW(cd->hdc, t, -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+            SelectObject(cd->hdc, of);
+            HPEN pen = CreatePen(PS_SOLID, 1, kLine), op = (HPEN)SelectObject(cd->hdc, pen);
+            MoveToEx(cd->hdc, cd->rc.right - 1, cd->rc.top + S(5), nullptr);
+            LineTo(cd->hdc, cd->rc.right - 1, cd->rc.bottom - S(5));
+            MoveToEx(cd->hdc, cd->rc.left, cd->rc.bottom - 1, nullptr);
+            LineTo(cd->hdc, cd->rc.right, cd->rc.bottom - 1);
+            SelectObject(cd->hdc, op); DeleteObject(pen);
+            return CDRF_SKIPDEFAULT;
+        }
+    }
     LRESULT res = DefSubclassProc(h, msg, wp, lp);
     if (msg != WM_PAINT || g_viewResults.empty()) return res;
 
@@ -384,7 +491,7 @@ LRESULT CALLBACK resultsSub(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
 
     HDC dc = GetDC(h);
     HFONT of = (HFONT)SelectObject(dc, g_fontHdr);
-    HPEN pen = CreatePen(PS_SOLID, 1, kText3), op = (HPEN)SelectObject(dc, pen);
+    HPEN pen = CreatePen(PS_SOLID, 1, kLine), op = (HPEN)SelectObject(dc, pen);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, kGroup);
     for (int i = first; i < n; ++i) {
@@ -627,70 +734,82 @@ void sendToEditor() {
 }
 
 void layout(int cw, int ch) {
-    const int m = 12, rh = 24, gap = 10, hh = 16, lh = 19;
+    const int m = S(14), rh = S(26), gap = S(14), hh = S(16), lh = S(20), hg = S(6), sp = S(8);
     const bool regex = isChecked(g_modeRegex);
+    const int right = cw - m;
     int y = m;
 
+    auto flow = [&](std::initializer_list<HWND> hs, int x, int top, int pad) {
+        for (HWND h : hs) { int w = textW(h, g_font) + pad; MoveWindow(h, x, top, w, rh, TRUE); x += w + sp; }
+        return x;
+    };
+
     // SOURCE
-    MoveWindow(g_secSource, m, y, 200, hh, TRUE); y += hh + 3;
-    MoveWindow(g_search, m, y, cw - m * 2 - 180, rh, TRUE);
-    MoveWindow(g_refresh, cw - m - 174, y, 84, rh, TRUE);
-    MoveWindow(g_file, cw - m - 84, y, 84, rh, TRUE);
-    y += rh + 4;
-    MoveWindow(g_source, m, y, cw - m * 2, 360, TRUE);   // 360 = dropdown height
-    y += rh + 3;
+    MoveWindow(g_secSource, m, y, S(200), hh, TRUE); y += hh + hg;
+    int rw = textW(g_refresh, g_font) + S(26), fw = textW(g_file, g_font) + S(26);
+    MoveWindow(g_search, m, y, cw - m * 2 - rw - fw - sp * 2, rh, TRUE);
+    MoveWindow(g_refresh, right - fw - rw - sp, y, rw, rh, TRUE);
+    MoveWindow(g_file, right - fw, y, fw, rh, TRUE);
+    y += rh + S(5);
+    MoveWindow(g_source, m, y, cw - m * 2, S(360), TRUE);   // 360 = dropdown height
+    y += rh + hg;
     MoveWindow(g_srcInfo, m, y, cw - m * 2, lh, TRUE);
     y += lh + gap;
 
     // WHAT TO FIND
-    MoveWindow(g_secFind, m, y, 200, hh, TRUE); y += hh + 3;
-    MoveWindow(g_modeUrl, m, y, 66, rh, TRUE);
-    MoveWindow(g_modeRegex, m + 70, y, 74, rh, TRUE);
-    y += rh + 3;
-    const int detailY = y;
-    MoveWindow(g_urlHint, m, detailY + 3, cw - m * 2, lh, TRUE);
-    MoveWindow(g_presetLabel, m, detailY + 4, 55, lh, TRUE);
-    int px = m + 60;
-    MoveWindow(g_pEmail, px, detailY, 66, rh, TRUE);
-    MoveWindow(g_pIpv4, px + 68, detailY, 58, rh, TRUE);
-    MoveWindow(g_pIpv6, px + 128, detailY, 58, rh, TRUE);
-    MoveWindow(g_pGuid, px + 188, detailY, 62, rh, TRUE);
-    MoveWindow(g_pApi, px + 252, detailY, 76, rh, TRUE);
-    MoveWindow(g_pPath, px + 330, detailY, 82, rh, TRUE);
-    MoveWindow(g_customLabel, m, detailY + rh + 6 + 4, 55, lh, TRUE);
-    MoveWindow(g_custom, m + 60, detailY + rh + 6, cw - m * 2 - 60, rh, TRUE);
-    y = regex ? (detailY + rh + 6 + rh + gap) : (detailY + lh + gap);
+    MoveWindow(g_secFind, m, y, S(200), hh, TRUE); y += hh + hg;
+    flow({g_modeUrl, g_modeRegex}, m, y, S(24));
+    y += rh + hg;
+    const int dy = y;
+    MoveWindow(g_urlHint, m, dy + S(3), cw - m * 2, lh, TRUE);
+    int lw = textW(g_customLabel, g_font) + sp;
+    MoveWindow(g_presetLabel, m, dy + S(4), lw, lh, TRUE);
+    flow({g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath}, m + lw + sp, dy, S(24));
+    const int cy = dy + rh + hg;
+    MoveWindow(g_customLabel, m, cy + S(4), lw, lh, TRUE);
+    MoveWindow(g_custom, m + lw + sp, cy, right - m - lw - sp, rh, TRUE);
+    y = regex ? (cy + rh + gap) : (dy + lh + gap);
 
     // DECODE
-    MoveWindow(g_secDecode, m, y, 200, hh, TRUE); y += hh + 3;
-    MoveWindow(g_ascii, m, y, 66, rh, TRUE);
-    MoveWindow(g_utf16, m + 70, y, 74, rh, TRUE);
-    MoveWindow(g_b64, m + 150, y, 74, rh, TRUE);
-    MoveWindow(g_hex, m + 228, y, 58, rh, TRUE);
+    MoveWindow(g_secDecode, m, y, S(200), hh, TRUE); y += hh + hg;
+    flow({g_ascii, g_utf16, g_b64, g_hex}, m, y, S(24));
     y += rh + gap;
 
     // scan bar
-    MoveWindow(g_scan, m, y, 100, rh + 2, TRUE);
-    MoveWindow(g_cancel, m + 108, y, 90, rh + 2, TRUE);
-    MoveWindow(g_status, m + 210, y + 3, cw - m * 2 - 210, lh, TRUE);
-    y += rh + 2 + gap;
+    int sx = flow({g_scan, g_cancel}, m, y, S(34));
+    MoveWindow(g_status, sx + sp, y + S(4), right - sx - sp, lh, TRUE);
+    y += rh + gap;
 
     // RESULTS
-    MoveWindow(g_secResults, m, y + 5, 70, hh, TRUE);
-    MoveWindow(g_filter, m + 76, y, cw - m * 2 - 76, rh, TRUE);
-    y += rh + 3;
+    int sw = textW(g_secResults, g_fontHdr) + sp;
+    MoveWindow(g_secResults, m, y + S(6), sw, hh, TRUE);
+    MoveWindow(g_filter, m + sw + sp, y, right - m - sw - sp, rh, TRUE);
+    y += rh + hg;
+
     int bottom = ch - m - rh;
     int listH = (bottom - gap) - y;
-    if (listH < 60) listH = 60;
+    if (listH < S(60)) listH = S(60);
     MoveWindow(g_results, m, y, cw - m * 2, listH, TRUE);
-    int listW = cw - m * 2 - 24;
-    int valW = listW - 90 - 220;
-    ListView_SetColumnWidth(g_results, 0, valW > 160 ? valW : 160);
+    RECT lc; GetClientRect(g_results, &lc);
+    int encW = S(90), srcW = S(230), valW = lc.right - encW - srcW;
+    if (valW < S(160)) valW = S(160);
+    ListView_SetColumnWidth(g_results, 0, valW);
+    ListView_SetColumnWidth(g_results, 1, encW);
+    ListView_SetColumnWidth(g_results, 2, srcW);
 
-    MoveWindow(g_copy, m, bottom, 120, rh, TRUE);
-    MoveWindow(g_save, m + 128, bottom, 120, rh, TRUE);
-    MoveWindow(g_editor, m + 256, bottom, 140, rh, TRUE);
-    MoveWindow(g_about, cw - m - 84, bottom, 84, rh, TRUE);
+    flow({g_copy, g_save, g_editor}, m, bottom, S(26));
+    int aw = textW(g_about, g_font) + S(26);
+    MoveWindow(g_about, right - aw, bottom, aw, rh, TRUE);
+}
+
+void applyFonts() {
+    for (HWND h : {g_search, g_source, g_refresh, g_file, g_srcInfo, g_modeUrl, g_modeRegex, g_urlHint,
+                   g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel,
+                   g_custom, g_ascii, g_utf16, g_b64, g_hex, g_scan, g_cancel, g_status, g_filter,
+                   g_results, g_copy, g_save, g_editor, g_about})
+        setFont(h, g_font);
+    for (HWND h : {g_secSource, g_secFind, g_secDecode, g_secResults})
+        setFont(h, g_fontHdr);
 }
 
 void relayout(HWND hwnd) {
@@ -702,24 +821,21 @@ void relayout(HWND hwnd) {
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
-        g_font = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-        g_fontHdr = CreateFontW(-12, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET,
-                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        g_dpi = (int)GetDpiForWindow(hwnd);
+        makeFonts();
         g_bgBrush = CreateSolidBrush(kBg);
         g_bg2Brush = CreateSolidBrush(kBg2);
 
         g_secSource = mkStatic(hwnd, L"SOURCE");
-        g_search = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        g_search = CreateWindowExW(0, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)ID_SEARCH, nullptr, nullptr);
         SendMessageW(g_search, EM_SETCUEBANNER, TRUE, (LPARAM)L"Filter processes by name...");
         g_source = CreateWindowExW(0, L"COMBOBOX", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
             0, 0, 0, 0, hwnd, (HMENU)ID_SOURCE, nullptr, nullptr);
-        g_refresh = mkButton(hwnd, L"Refresh", ID_REFRESH);
-        g_file = mkButton(hwnd, L"File...", ID_FILE);
+        SetWindowTheme(g_source, L"DarkMode_CFD", nullptr);
+        g_refresh = mkPush(hwnd, L"Refresh", ID_REFRESH);
+        g_file = mkPush(hwnd, L"File...", ID_FILE);
         g_srcInfo = mkStatic(hwnd, L"Drop files or folders on the window, or scan the selected process.");
 
         g_secFind = mkStatic(hwnd, L"WHAT TO FIND");
@@ -737,7 +853,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_pPath = mkButton(hwnd, L"File path", ID_P_PATH, BS_AUTOCHECKBOX);
         SendMessageW(g_pEmail, BM_SETCHECK, BST_CHECKED, 0);
         g_customLabel = mkStatic(hwnd, L"Custom:");
-        g_custom = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        g_custom = CreateWindowExW(0, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)ID_CUSTOM, nullptr, nullptr);
         SendMessageW(g_custom, EM_SETCUEBANNER, TRUE, (LPARAM)L"your own regex (ECMAScript)...");
 
@@ -748,19 +864,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_hex = mkButton(hwnd, L"Hex", ID_ENC_HEX, BS_AUTOCHECKBOX);
         for (HWND h : {g_ascii, g_utf16, g_b64, g_hex}) SendMessageW(h, BM_SETCHECK, BST_CHECKED, 0);
 
-        g_scan = mkButton(hwnd, L"Scan", ID_SCAN, BS_DEFPUSHBUTTON);
-        g_cancel = mkButton(hwnd, L"Cancel", ID_CANCEL);
+        g_scan = mkPush(hwnd, L"Scan", ID_SCAN);
+        g_cancel = mkPush(hwnd, L"Cancel", ID_CANCEL);
         EnableWindow(g_cancel, FALSE);
         g_status = mkStatic(hwnd, L"Ready.");
 
         g_secResults = mkStatic(hwnd, L"RESULTS");
-        g_filter = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        g_filter = CreateWindowExW(0, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)ID_FILTER, nullptr, nullptr);
-        SendMessageW(g_filter, EM_SETCUEBANNER, TRUE, (LPARAM)L"Filter results by name...");
-        g_results = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+        SendMessageW(g_filter, EM_SETCUEBANNER, TRUE, (LPARAM)L"Filter results...");
+        g_results = CreateWindowExW(0, WC_LISTVIEWW, L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
             0, 0, 0, 0, hwnd, (HMENU)ID_RESULTS, nullptr, nullptr);
         ListView_SetExtendedListViewStyle(g_results, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        SetWindowTheme(g_results, L"DarkMode_Explorer", nullptr);
         ListView_SetBkColor(g_results, kBg2);
         ListView_SetTextBkColor(g_results, kBg2);
         ListView_SetTextColor(g_results, kText);
@@ -770,22 +887,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         col.cx = 90;  col.pszText = (LPWSTR)L"Encoding"; ListView_InsertColumn(g_results, 1, &col);
         col.cx = 220; col.pszText = (LPWSTR)L"Source"; ListView_InsertColumn(g_results, 2, &col);
 
-        g_copy = mkButton(hwnd, L"Copy selected", ID_COPY);
-        g_save = mkButton(hwnd, L"Save as TXT", ID_SAVE);
-        g_editor = mkButton(hwnd, L"Send to editor", ID_EDITOR);
-        g_about = mkButton(hwnd, L"About", ID_ABOUT);
+        g_copy = mkPush(hwnd, L"Copy selected", ID_COPY);
+        g_save = mkPush(hwnd, L"Save as TXT", ID_SAVE);
+        g_editor = mkPush(hwnd, L"Send to editor", ID_EDITOR);
+        g_about = mkPush(hwnd, L"About", ID_ABOUT);
         enableResultActions(false);
 
-        for (HWND h : {g_search, g_source, g_refresh, g_file, g_srcInfo, g_modeUrl, g_modeRegex, g_urlHint,
-                       g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel,
-                       g_custom, g_ascii, g_utf16, g_b64, g_hex, g_scan, g_cancel, g_status, g_filter,
-                       g_results, g_copy, g_save, g_editor, g_about})
-            setFont(h, g_font);
-        for (HWND h : {g_secSource, g_secFind, g_secDecode, g_secResults})
-            setFont(h, g_fontHdr);
+        applyFonts();
 
         for (HWND h : {g_modeUrl, g_modeRegex, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath,
-                       g_ascii, g_utf16, g_b64, g_hex})
+                       g_ascii, g_utf16, g_b64, g_hex, g_search, g_custom, g_filter})
             SetWindowTheme(h, L"", L"");
 
         BOOL dark = TRUE;
@@ -798,6 +909,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ChangeWindowMessageFilterEx(h, (UINT)m, MSGFLT_ALLOW, nullptr);
         }
         SetWindowSubclass(g_results, resultsSub, 0, 0);
+
+        MONITORINFO mi{ sizeof(mi) };
+        GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+        int ww = std::min<int>(S(1000), mi.rcWork.right - mi.rcWork.left);
+        int wh = std::min<int>(S(760), mi.rcWork.bottom - mi.rcWork.top);
+        SetWindowPos(hwnd, nullptr, mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - ww) / 2,
+                     mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - wh) / 2, ww, wh, SWP_NOZORDER);
 
         refreshProcesses();
         updateModeVisibility();
@@ -813,8 +931,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_GETMINMAXINFO: {
         auto* mmi = (MINMAXINFO*)lp;
-        mmi->ptMinTrackSize.x = 780;
-        mmi->ptMinTrackSize.y = 580;
+        mmi->ptMinTrackSize.x = S(820);
+        mmi->ptMinTrackSize.y = S(600);
+        return 0;
+    }
+    case WM_DPICHANGED: {
+        g_dpi = HIWORD(wp);
+        makeFonts();
+        applyFonts();
+        const RECT* r = (const RECT*)lp;
+        SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
         return 0;
     }
     case WM_CTLCOLORSTATIC: {
@@ -838,6 +965,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetTextColor(dc, kText);
         SetBkColor(dc, kBg2);
         return (LRESULT)g_bg2Brush;
+    }
+    case WM_DRAWITEM: {
+        auto* d = (const DRAWITEMSTRUCT*)lp;
+        if (d->CtlType == ODT_COMBOBOX) drawCombo(d); else drawPush(d);
+        return TRUE;
+    }
+    case WM_MEASUREITEM:
+        ((MEASUREITEMSTRUCT*)lp)->itemHeight = S(22);
+        return TRUE;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        HPEN pen = CreatePen(PS_SOLID, 1, kLine);
+        for (HWND c : {g_search, g_source, g_custom, g_filter, g_results}) frame(dc, c, pen);
+        DeleteObject(pen);
+        EndPaint(hwnd, &ps);
+        return 0;
     }
     case WM_ERASEBKGND: {
         RECT rc; GetClientRect(hwnd, &rc);
@@ -918,6 +1062,7 @@ int runGui(HINSTANCE hInst) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     for (int i = 1; i < __argc; ++i)
         if (wcscmp(__wargv[i], L"--rip-pid") == 0 && i + 1 < __argc)
             g_autoRipPid = (uint32_t)wcstoul(__wargv[i + 1], nullptr, 10);

@@ -29,6 +29,13 @@ The C/C++ reads like a veteran demoscene coder wrote it. Non-negotiable.
   `lto, terse about` not a paragraph.
 - No issue tracker on this repo. No tickets, no AI attribution, anywhere.
 
+## Look
+- Dark or nothing. Anything the common controls paint light -- combo field,
+  list header, push buttons, scrollbars -- is drawn here or re-themed.
+- Dim text stays at 7:1 on the background. Sample the pixels, don't eyeball it.
+- Every metric goes through `S()`. The window is per-monitor DPI aware, so no
+  raw pixel constants in the layout.
+
 ## Performance
 - FXChainPlayer rule, and it holds here: performance is king. Paint and scan
   paths stay O(visible) or O(work), never O(everything). 20k groups repaint
