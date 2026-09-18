@@ -12,6 +12,8 @@ URL mode knows http/https, ftp, ws, rtsp, rtmp, mms, udp etc. I made the URL det
 
 Regex mode has a few presets for the usual stuff: email, IPv4/IPv6, GUIDs, API keys, file paths... or give it your own ECMAScript regex.
 
+There's a filter box over the results too, so you can narrow a few thousand hits down to the domain or string you actually came for. It filters on the group name and the value, and whatever survives is what gets exported.
+
 Findings stay plain text. No clickable URLs. `Save as TXT` and `Send to editor` write straight to disk and never touch the clipboard. This is intentional... some download managers love watching the clipboard and immediately grabbing every URL they see. `Copy selected` is the only thing that puts anything there.
 
 It only reads memory the current user is allowed to open. No injection, no writing into other processes, no messing around with the Windows security stuff.
@@ -82,6 +84,7 @@ Reading a higher-integrity process needs an elevated StringRipper. Windows being
 - `src/scan_driver.hpp` - worker pool for memory + files
 - `src/file_read.hpp` - folder crawling
 - `src/main.cpp` - Win32 GUI + CLI
+- `src/StringRipper.rc`, `src/version.h` - version info the exe shows in Explorer
 - `tests/` - core/driver tests
 - `CODE_STYLE.md` - some rules so the native code doesn't turn into complete spaghetti
 
