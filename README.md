@@ -78,7 +78,7 @@ StringRipper.exe --help
 
 Reading a higher-integrity process needs an elevated StringRipper. Windows being Windows :) Drag and drop keeps working when it runs elevated, the drop messages are let through on purpose.
 
-The exe asks for nothing at startup, it runs as whoever started it. When a target needs more than that - a process running higher, or files you are not allowed to read - there's an `Admin` button next to `File...`, and a scan that came up empty because of rights offers the same thing. Either way it comes back as a fresh elevated instance with the same source already loaded, so you don't have to pick it again. Once it runs elevated the button is gone and the title says `[admin]`.
+The exe asks for nothing at startup, it runs as whoever started it (the manifest is `asInvoker`, on purpose). When a target needs more than that - a process running higher, or files you are not allowed to read - it says so and asks you to close it and start it again as administrator yourself (right-click the exe, Run as administrator). It does not silently relaunch itself. When it is running elevated the title says `[admin]`.
 
 ## Source layout
 

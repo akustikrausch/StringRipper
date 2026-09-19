@@ -125,17 +125,6 @@ static bool elevated() {
     return up;
 }
 
-static bool relaunchElevated(const std::wstring& args) {
-    wchar_t exe[MAX_PATH] = L"";
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    SHELLEXECUTEINFOW si{ sizeof(si) };
-    si.lpVerb = L"runas";
-    si.lpFile = exe;
-    si.lpParameters = args.empty() ? nullptr : args.c_str();
-    si.nShow = SW_SHOWNORMAL;
-    return ShellExecuteExW(&si) != FALSE;
-}
-
 // ---------------------------------------------------------------- scan helpers (shared GUI/CLI)
 
 static std::vector<ur::Group> scanProcess(const ur::Detector& det, uint32_t pid,
@@ -264,7 +253,7 @@ enum : int {
     ID_SEARCH = 1000, ID_SOURCE, ID_REFRESH, ID_FILE, ID_MODE_URL, ID_MODE_REGEX,
     ID_ENC_ASCII, ID_ENC_UTF16, ID_ENC_B64, ID_ENC_HEX,
     ID_P_EMAIL, ID_P_IPV4, ID_P_IPV6, ID_P_GUID, ID_P_APIKEY, ID_P_PATH,
-    ID_CUSTOM, ID_SCAN, ID_CANCEL, ID_RESULTS, ID_COPY, ID_SAVE, ID_EDITOR, ID_ABOUT, ID_FILTER, ID_ADMIN
+    ID_CUSTOM, ID_SCAN, ID_CANCEL, ID_RESULTS, ID_COPY, ID_SAVE, ID_EDITOR, ID_ABOUT, ID_FILTER
 };
 constexpr UINT WM_APP_DONE = WM_APP + 1;
 
@@ -285,7 +274,7 @@ const COLORREF kBDef = RGB(0x36, 0x36, 0x48);
 const COLORREF kBFoc = RGB(0x4A, 0x4A, 0x62);
 
 HWND g_main = nullptr;
-HWND g_secSource, g_search, g_source, g_refresh, g_file, g_admin, g_srcInfo;
+HWND g_secSource, g_search, g_source, g_refresh, g_file, g_srcInfo;
 HWND g_secFind, g_modeUrl, g_modeRegex, g_urlHint;
 HWND g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel, g_custom;
 HWND g_secDecode, g_ascii, g_utf16, g_b64, g_hex;
@@ -310,15 +299,12 @@ std::wstring g_statusFull;
 ur::Mode g_lastMode = ur::Mode::Urls;
 std::vector<std::filesystem::path> g_chosenPaths;
 uint32_t g_autoRipPid = 0;
-std::vector<std::filesystem::path> g_autoRipPaths;
 bool g_elevated = false;
 bool g_scanDeniedFiles = false;
 uint32_t g_scanPid = 0;
 bool g_scanDenied = false;
 bool g_scanNeedsElev = false;
 
-std::wstring sourceArgs();
-void goAdmin();
 void applyFonts();
 void fitColumns();
 void layout(int cw, int ch);
@@ -762,17 +748,19 @@ void onDone(std::vector<ur::Group>* groups) {
     applyResultFilter();
     setScanningUi(false);
     if (g_scanDenied) {
-        if (g_scanNeedsElev && g_scanPid) {
-            if (MessageBoxW(g_main, L"This process runs with higher rights. Relaunch StringRipper as administrator to scan it?",
-                            L"StringRipper", MB_YESNO | MB_ICONQUESTION) == IDYES)
-                fxchain::ripBackend().requestElevation(g_scanPid);
-        } else {
+        if (g_scanNeedsElev && !g_elevated)
+            MessageBoxW(g_main, L"This process runs with higher rights. Close StringRipper and start it again "
+                                L"as administrator (right-click the exe, Run as administrator), then scan it again.",
+                        L"StringRipper", MB_OK | MB_ICONINFORMATION);
+        else
             MessageBoxW(g_main, L"Could not open that process for reading.", L"StringRipper", MB_ICONWARNING);
-        }
-    } else if (g_scanDeniedFiles && !g_elevated) {
-        if (MessageBoxW(g_main, L"Some of that could not be read. Relaunch StringRipper as administrator and scan it again?",
-                        L"StringRipper", MB_YESNO | MB_ICONQUESTION) == IDYES)
-            goAdmin();
+    } else if (g_scanDeniedFiles) {
+        if (!g_elevated)
+            MessageBoxW(g_main, L"Some of that could not be read. Close StringRipper and start it again "
+                                L"as administrator (right-click the exe, Run as administrator), then scan again.",
+                        L"StringRipper", MB_OK | MB_ICONINFORMATION);
+        else
+            MessageBoxW(g_main, L"Some of that could not be read, even as administrator.", L"StringRipper", MB_ICONWARNING);
     }
 }
 
@@ -893,14 +881,11 @@ void layout(int cw, int ch) {
     // SOURCE
     MoveWindow(g_secSource, m, y, S(200), hh, TRUE); y += hh + hg;
     int rw = textW(g_refresh, g_font) + S(26), fw = textW(g_file, g_font) + S(26);
-    int aw2 = g_elevated ? 0 : textW(g_admin, g_font) + S(26);
-    int agap = g_elevated ? 0 : sp;
-    int sw2 = cw - m * 2 - rw - fw - aw2 - sp * 2 - agap;
+    int sw2 = cw - m * 2 - rw - fw - sp * 2;
     g_fields[0] = { m, y, m + sw2, y + rh };
     MoveWindow(g_search, m + S(6), y + S(4), sw2 - S(12), rh - S(8), TRUE);
-    MoveWindow(g_refresh, right - fw - rw - aw2 - sp - agap, y, rw, rh, TRUE);
-    MoveWindow(g_file, right - fw - aw2 - agap, y, fw, rh, TRUE);
-    if (!g_elevated) MoveWindow(g_admin, right - aw2, y, aw2, rh, TRUE);
+    MoveWindow(g_refresh, right - fw - rw - sp, y, rw, rh, TRUE);
+    MoveWindow(g_file, right - fw, y, fw, rh, TRUE);
     y += rh + S(5);
     MoveWindow(g_source, m + S(6), y + S(4), cw - m * 2 - S(12), S(360), TRUE);   // 360 = dropdown height
     { RECT cr2; GetWindowRect(g_source, &cr2); MapWindowPoints(nullptr, g_main, (POINT*)&cr2, 2);
@@ -967,28 +952,11 @@ void fitColumns() {
     ListView_SetColumnWidth(g_results, 2, srcW);
 }
 
-std::wstring sourceArgs() {
-    if (!g_chosenPaths.empty()) {
-        std::wstring a = L"--rip-files";
-        for (const auto& p : g_chosenPaths) a += L" \"" + p.wstring() + L"\"";
-        return a;
-    }
-    int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
-    if (sel >= 0 && sel < (int)g_procsView.size())
-        return L"--rip-pid " + std::to_wstring(g_procsView[sel].pid);
-    return {};
-}
-
-void goAdmin() {
-    if (!relaunchElevated(sourceArgs())) return;
-    PostMessageW(g_main, WM_CLOSE, 0, 0);
-}
-
 void applyFonts() {
     for (HWND h : {g_search, g_source, g_refresh, g_file, g_srcInfo, g_modeUrl, g_modeRegex, g_urlHint,
                    g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_customLabel,
                    g_custom, g_ascii, g_utf16, g_b64, g_hex, g_scan, g_cancel, g_status, g_filter,
-                   g_results, g_copy, g_save, g_editor, g_about, g_admin})
+                   g_results, g_copy, g_save, g_editor, g_about})
         setFont(h, g_font);
     for (HWND h : {g_secSource, g_secFind, g_secDecode, g_secResults})
         setFont(h, g_fontHdr);
@@ -1018,8 +986,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowTheme(g_source, L"DarkMode_CFD", nullptr);
         g_refresh = mkPush(hwnd, L"Refresh", ID_REFRESH);
         g_file = mkPush(hwnd, L"File...", ID_FILE);
-        g_admin = mkPush(hwnd, L"Admin", ID_ADMIN);
-        ShowWindow(g_admin, g_elevated ? SW_HIDE : SW_SHOW);
         g_srcInfo = mkStatic(hwnd, L"Drop files or folders on the window, or scan the selected process.");
 
         g_secFind = mkSection(hwnd, L"WHAT TO FIND");
@@ -1105,9 +1071,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_autoRipPid) {
             for (int i = 0; i < (int)g_procsView.size(); ++i)
                 if (g_procsView[i].pid == g_autoRipPid) { SendMessageW(g_source, CB_SETCURSEL, i, 0); break; }
-            PostMessageW(hwnd, WM_COMMAND, ID_SCAN, 0);
-        } else if (!g_autoRipPaths.empty()) {
-            setSourcePaths(g_autoRipPaths);
             PostMessageW(hwnd, WM_COMMAND, ID_SCAN, 0);
         }
         return 0;
@@ -1200,7 +1163,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_SAVE: saveAsTxt(); break;
         case ID_EDITOR: sendToEditor(); break;
         case ID_ABOUT: showAbout(); break;
-        case ID_ADMIN: goAdmin(); break;
         case ID_ENC_ASCII: case ID_ENC_UTF16: case ID_ENC_B64: case ID_ENC_HEX:
         case ID_P_EMAIL: case ID_P_IPV4: case ID_P_IPV6:
         case ID_P_GUID: case ID_P_APIKEY: case ID_P_PATH: {
@@ -1312,15 +1274,10 @@ int runGui(HINSTANCE hInst) {
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_elevated = elevated();
-    for (int i = 1; i < __argc; ++i) {
+    for (int i = 1; i < __argc; ++i)
         if (wcscmp(__wargv[i], L"--rip-pid") == 0 && i + 1 < __argc)
             g_autoRipPid = (uint32_t)wcstoul(__wargv[i + 1], nullptr, 10);
-        else if (wcscmp(__wargv[i], L"--rip-files") == 0) {
-            for (int j = i + 1; j < __argc; ++j) g_autoRipPaths.emplace_back(__wargv[j]);
-            break;
-        }
-    }
-    if (g_autoRipPid || !g_autoRipPaths.empty()) return runGui(hInst);
+    if (g_autoRipPid) return runGui(hInst);
     if (__argc > 1) return runCli(__argc, __wargv);
     return runGui(hInst);
 }
