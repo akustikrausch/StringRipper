@@ -65,7 +65,9 @@ cmake -DFXCHAINPLAYER_DIR=<checkout>
 
 Run it without arguments if you want the GUI. Pick/filter a process or file, choose URL or Regex mode, select the encodings and hit Scan.
 
-You can also drop files or folders straight onto the window. Several at once is fine, folders get walked recursively. A drop only sets the source, you still hit Scan yourself... I don't want it chewing through a 40 GB folder just because something slipped out of Explorer.
+You can also drop files or folders straight onto the window, or straight onto the exe itself (Explorer launches it and it scans them). Several at once is fine, folders get walked recursively. Dropping on the window only sets the source and you still hit Scan; dropping on the exe scans right away. Only one instance runs at a time, a second launch hands its files to the first and bows out, so scans never race.
+
+The process list refreshes itself as programs come and go, and if the process you scanned exits the results clear themselves. Scan progress shows a percent. There's a Clear button, and a Crap filter (on by default in URL mode) that drops placeholder and XML-namespace hosts. Regex mode has a Download preset for partial file URLs ending in .exe/.zip/.dmg/.pkg and the like.
 
 CLI works too:
 
@@ -73,6 +75,8 @@ CLI works too:
 StringRipper.exe --pid 4821
 StringRipper.exe --file game.exe --preset email,apikey
 StringRipper.exe --folder .\dump --regex "\bAKIA[0-9A-Z]{16}\b" --out keys.txt
+StringRipper.exe --file setup.bin --preset fileurl        # download URLs
+StringRipper.exe --folder .\dump --scheme https --no-crap  # keep every host
 StringRipper.exe --help
 ```
 
@@ -86,8 +90,14 @@ The exe asks for nothing at startup, it runs as whoever started it (the manifest
 - `src/scan_driver.hpp` - worker pool for memory + files
 - `src/file_read.hpp` - folder crawling
 - `src/main.cpp` - Win32 GUI + CLI
-- `src/StringRipper.rc`, `src/version.h` - version info the exe shows in Explorer
+- `src/cli_main.cpp` - portable CLI for macOS/Linux (files/folders, no process reader)
+- `src/StringRipper.rc`, `src/version.h`, `src/StringRipper.ico` - icon + version info
 - `tests/` - core/driver tests
+- `docs/MACOS.md` - how the macOS build works and how to build it
 - `CODE_STYLE.md` - some rules so the native code doesn't turn into complete spaghetti
+
+## macOS / Linux
+
+The detection core is portable. `build-macos.sh` builds a universal CLI (arm64 min 11.0, x86_64 min 10.13) that scans files and folders; process memory stays Windows-only. Full details, including building both slices on an Apple Silicon Mac and the GitHub Actions route, are in [`docs/MACOS.md`](docs/MACOS.md).
 
 Akustikrausch.
