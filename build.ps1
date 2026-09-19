@@ -34,5 +34,20 @@ $cl = "cl /nologo /std:c++20 /EHsc /O2 /Gy /GL /MT /W3 /DUNICODE /D_UNICODE /DST
 # cd into a local temp dir so object files do not need a UNC-unfriendly /Fo.
 cmd /c "call `"$vcvars`" >nul 2>&1 && cd /d `"$tmp`" && $rcc && $cl"
 if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }
+
+# Sign when a cert is configured. A signed exe from a known publisher stops
+# Defender's ML heuristics flagging a memory-reading tool as a false positive.
+# Set SR_SIGN_THUMBPRINT (cert in the store) or SR_SIGN_PFX + SR_SIGN_PFX_PASS.
+if ($env:SR_SIGN_THUMBPRINT -or $env:SR_SIGN_PFX) {
+    $ts = "http://timestamp.digicert.com"
+    if ($env:SR_SIGN_THUMBPRINT) {
+        $sign = "signtool sign /sha1 $env:SR_SIGN_THUMBPRINT /fd SHA256 /tr $ts /td SHA256 `"$out`""
+    } else {
+        $sign = "signtool sign /f `"$env:SR_SIGN_PFX`" /p `"$env:SR_SIGN_PFX_PASS`" /fd SHA256 /tr $ts /td SHA256 `"$out`""
+    }
+    cmd /c "call `"$vcvars`" >nul 2>&1 && $sign"
+    if ($LASTEXITCODE -ne 0) { throw "signing failed ($LASTEXITCODE)" }
+    Write-Host "signed $out"
+}
 Write-Host "built $out  (reused FXChainPlayer ripper from $fxsrc)"
 Get-Item $out | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize | Out-String
