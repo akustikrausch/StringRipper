@@ -1,0 +1,22 @@
+name: macOS CLI
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: macos-14          # Apple Silicon runner; its SDK builds both slices
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal CLI
+        run: ./build-macos.sh
+      - name: Smoke test
+        run: |
+          printf 'https://cdn.example.com/App_1.zip\n/path/App_2.zip\n' > s.txt
+          ./dist/mac/stringripper --preset fileurl s.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stringripper-macos
+          path: dist/mac/stringripper*

@@ -7,3 +7,4 @@
 *.o
 *.exe.manifest
 # bin/StringRipper.exe is committed on purpose
+/dist/

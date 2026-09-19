@@ -10,29 +10,35 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(FXCHAINPLAYER_DIR "${CMAKE_SOURCE_DIR}/../VST-Player" CACHE PATH "FXChainPlayer source checkout")
 set(FX_SRC "${FXCHAINPLAYER_DIR}/src")
 
-if(NOT WIN32)
-  message(FATAL_ERROR "StringRipper is Windows-only. The portable core (src/scan_core.hpp) can still be unit-tested elsewhere via tests/test_scan.cpp.")
-endif()
-if(NOT EXISTS "${FX_SRC}/audio/rip_backend_win32.cpp")
-  message(FATAL_ERROR "FXChainPlayer source not found at ${FX_SRC}. Set -DFXCHAINPLAYER_DIR=<checkout>.")
-endif()
+if(WIN32)
+  if(NOT EXISTS "${FX_SRC}/audio/rip_backend_win32.cpp")
+    message(FATAL_ERROR "FXChainPlayer source not found at ${FX_SRC}. Set -DFXCHAINPLAYER_DIR=<checkout>.")
+  endif()
 
-# Static CRT so the result is a single portable exe with no runtime DLLs.
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+  # Static CRT so the result is a single portable exe with no runtime DLLs.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
-add_executable(StringRipper WIN32
-  src/main.cpp
-  "${FX_SRC}/audio/rip_backend_win32.cpp"    # reused FXChainPlayer ripper backend
-  src/StringRipper.rc
-  src/scan_core.hpp
-  src/scan_driver.hpp
-  src/file_read.hpp
-  src/version.h)
+  add_executable(StringRipper WIN32
+    src/main.cpp
+    "${FX_SRC}/audio/rip_backend_win32.cpp"    # reused FXChainPlayer ripper backend
+    src/StringRipper.rc
+    src/scan_core.hpp
+    src/scan_driver.hpp
+    src/file_read.hpp
+    src/version.h)
 
-target_include_directories(StringRipper PRIVATE "${FX_SRC}")
-target_compile_definitions(StringRipper PRIVATE UNICODE _UNICODE)
-if(MSVC)
-  target_compile_options(StringRipper PRIVATE /W3 /permissive- /EHsc)
+  target_include_directories(StringRipper PRIVATE "${FX_SRC}")
+  target_compile_definitions(StringRipper PRIVATE UNICODE _UNICODE)
+  if(MSVC)
+    target_compile_options(StringRipper PRIVATE /W3 /permissive- /EHsc)
+  endif()
+else()
+  # macOS / Linux: the portable CLI (files and folders; process memory is
+  # Windows-only). See docs/MACOS.md and build-macos.sh.
+  find_package(Threads REQUIRED)
+  add_executable(stringripper src/cli_main.cpp)
+  target_include_directories(stringripper PRIVATE src)
+  target_link_libraries(stringripper PRIVATE Threads::Threads)
 endif()
 
 # Portable core self-test (no Windows APIs, no FXChainPlayer).
@@ -41,7 +47,10 @@ add_executable(test_scan tests/test_scan.cpp)
 add_test(NAME scan_core COMMAND test_scan)
 
 # Driver test: runs the multi-threaded scan over a mock IMemoryReader (needs the
-# FXChainPlayer headers for the interface, but opens no real process).
-add_executable(test_driver tests/test_driver.cpp)
-target_include_directories(test_driver PRIVATE "${FX_SRC}" src)
-add_test(NAME scan_driver COMMAND test_driver)
+# FXChainPlayer headers for the interface, but opens no real process). Skipped
+# where that checkout is absent (e.g. a bare macOS build box).
+if(EXISTS "${FX_SRC}/audio/memory_ripper.h")
+  add_executable(test_driver tests/test_driver.cpp)
+  target_include_directories(test_driver PRIVATE "${FX_SRC}" src)
+  add_test(NAME scan_driver COMMAND test_driver)
+endif()

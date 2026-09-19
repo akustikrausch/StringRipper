@@ -3,7 +3,10 @@
 #pragma once
 
 #include "scan_core.hpp"
+#if __has_include("audio/memory_ripper.h")
 #include "audio/memory_ripper.h"
+#define SR_HAVE_RIPPER 1
+#endif
 
 #include <atomic>
 #include <condition_variable>
@@ -93,6 +96,7 @@ private:
     std::size_t maxInFlight_;
 };
 
+#ifdef SR_HAVE_RIPPER
 inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
                                const std::string& sourceName, const DriverLimits& lim,
                                const std::function<bool(uint64_t)>& progress = {}) {
@@ -133,6 +137,7 @@ inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
     }
     return total;
 }
+#endif // SR_HAVE_RIPPER
 
 inline bool scanFileInto(const std::filesystem::path& path, ScanPool& pool, const DriverLimits& lim,
                          const std::function<void(uint64_t)>& progress = {}) {
