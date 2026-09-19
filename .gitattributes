@@ -11,3 +11,4 @@ LICENSE text eol=lf
 *.exe   binary
 *.exe.manifest binary
 *.png   binary
+*.ico   binary

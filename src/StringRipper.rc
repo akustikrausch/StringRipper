@@ -1,6 +1,9 @@
 #include <windows.h>
 #include "version.h"
 
+#define IDI_APP 1
+IDI_APP ICON "StringRipper.ico"
+
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION    SR_VER
 PRODUCTVERSION SR_VER

@@ -134,16 +134,20 @@ inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
     return total;
 }
 
-inline bool scanFileInto(const std::filesystem::path& path, ScanPool& pool, const DriverLimits& lim) {
+inline bool scanFileInto(const std::filesystem::path& path, ScanPool& pool, const DriverLimits& lim,
+                         const std::function<void(uint64_t)>& progress = {}) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     const std::string label = path.string();
     std::vector<uint8_t> chunk(lim.window);
     std::vector<uint8_t> tail;
+    uint64_t done = 0;
     for (;;) {
         f.read(reinterpret_cast<char*>(chunk.data()), static_cast<std::streamsize>(lim.window));
         std::streamsize got = f.gcount();
         if (got <= 0) break;
+        done += static_cast<uint64_t>(got);
+        if (progress) progress(done);
         std::vector<uint8_t> buf;
         buf.reserve(tail.size() + static_cast<std::size_t>(got));
         buf.insert(buf.end(), tail.begin(), tail.end());
