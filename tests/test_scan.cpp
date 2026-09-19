@@ -129,6 +129,36 @@ int main() {
         CHECK(ur::countFindings(g) == 1, "cross-sink duplicate collapsed to one");
     }
 
+    // Crap filter drops namespace/reserved hosts by default, keeps them when off
+    {
+        std::vector<uint8_t> b;
+        appendAscii(b, "ns http://www.w3.org/2000/svg and https://good.ripper.dev/x here");
+        ur::Options on; ur::Detector d1(on);
+        ur::Sink s1; d1.scan(b.data(), b.size(), "t", s1);
+        std::vector<ur::Sink> v1; v1.push_back(std::move(s1));
+        auto g1 = ur::mergeSinks(v1);
+        CHECK(!hasGroup(g1, "www.w3.org") && hasGroup(g1, "good.ripper.dev"),
+              "crap filter drops w3.org, keeps real host");
+
+        ur::Options off; off.dropCrap = false; ur::Detector d2(off);
+        ur::Sink s2; d2.scan(b.data(), b.size(), "t", s2);
+        std::vector<ur::Sink> v2; v2.push_back(std::move(s2));
+        auto g2 = ur::mergeSinks(v2);
+        CHECK(hasGroup(g2, "www.w3.org"), "crap filter off keeps w3.org");
+    }
+
+    // Download-URL preset matches a bare path ending in an installer extension
+    {
+        std::vector<uint8_t> b;
+        appendAscii(b, "path /plugins/AmpliTube5/AmpliTube_5_10_9.zip end");
+        ur::Options o; o.mode = ur::Mode::Regex; o.presets = {"fileurl"};
+        ur::Detector det(o); ur::Sink s; det.scan(b.data(), b.size(), "t", s);
+        std::vector<ur::Sink> v; v.push_back(std::move(s));
+        auto g = ur::mergeSinks(v);
+        CHECK(hasValue(g, "/plugins/AmpliTube5/AmpliTube_5_10_9.zip"),
+              "fileurl preset matches partial path");
+    }
+
     // Bad custom regex -> throws
     {
         bool threw = false;

@@ -38,6 +38,7 @@ struct Options {
     std::string customRegex;
     bool customWholeWord = false;
     bool caseInsensitive = false;
+    bool dropCrap = true;               /* URL mode: drop placeholder/namespace noise */
 };
 
 struct Finding {
@@ -66,6 +67,7 @@ inline const std::vector<Preset>& builtinPresets() {
         {"guid",     "GUID",          R"(\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b)"},
         {"apikey",   "API key",       R"(\b(?:AKIA[0-9A-Z]{16}|gh[opusr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9\-]{10,}|sk_(?:live|test)_[A-Za-z0-9]{16,})\b)"},
         {"filepath", "File path",     R"((?:[A-Za-z]:\\|\\\\)[^\r\n"<>|?*\x00]{2,})"},
+        {"fileurl",  "Download URL",  R"([A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]{2,}\.(?:exe|msi|zip|7z|rar|gz|tgz|tar|bz2|xz|dmg|pkg|app|iso|deb|rpm|apk|cab|jar|whl|nupkg|vsix|appimage|bin|run)\b)"},
     };
     return p;
 }
@@ -255,6 +257,30 @@ inline bool plausibleHost(const std::string& h) {
     return true;
 }
 
+inline bool endsWith(const std::string& s, const std::string& suf) {
+    return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+}
+
+/* obvious noise: placeholder hosts, reserved TLDs, and the XML/namespace domains
+   that flood a memory dump. host is already lowercased and plausible. */
+inline bool looksCrap(const std::string& h) {
+    static const char* exact[] = {
+        "example.com", "example.org", "example.net", "example.edu",
+        "localhost", "127.0.0.1", "0.0.0.0", "domain.com", "test.com",
+        "www.w3.org", "w3.org", "purl.org", "xml.org", "java.sun.com",
+    };
+    for (const char* e : exact) if (h == e) return true;
+    static const char* nsSuffix[] = {
+        ".w3.org", ".xmlsoap.org", "schemas.microsoft.com", "schemas.android.com",
+        ".openxmlformats.org", ".docbook.org", "ns.adobe.com", "iptc.org",
+    };
+    for (const char* s : nsSuffix) if (endsWith(h, s)) return true;
+    static const char* tld[] = { ".local", ".localhost", ".example", ".test",
+                                 ".invalid", ".lan", ".internal", ".arpa" };
+    for (const char* t : tld) if (endsWith(h, t)) return true;
+    return false;
+}
+
 } // namespace detail
 
 class Detector {
@@ -341,6 +367,7 @@ private:
             std::string url = detail::trimUrl(s.substr(start, end - start));
             std::string host = detail::urlHost(url);
             if (url.size() >= 8 && detail::plausibleHost(host) &&
+                !(opt_.dropCrap && detail::looksCrap(host)) &&
                 (opt_.schemes.empty() ||
                  std::find(opt_.schemes.begin(), opt_.schemes.end(), scheme) != opt_.schemes.end()))
                 sink.add(url, enc, source, host);
