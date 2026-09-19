@@ -50,7 +50,6 @@
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
-#pragma comment(linker, "/MANIFESTUAC:\"level='asInvoker' uiAccess='false'\"")
 #pragma comment(linker, "\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")

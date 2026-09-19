@@ -29,7 +29,13 @@ $tmp = $env:TEMP
 $res = Join-Path $tmp "StringRipper.res"
 $build = Get-Date -Format "yyyyMMddHHmm"   # build number = build timestamp
 
-$rcc = "rc /nologo /I `"$srcdir`" /fo `"$res`" `"$rc`""
+# rc runs with the CWD in $tmp (UNC dirs can't be a CWD), and it resolves the
+# ICON path relative to that CWD, so stage the .rc + .ico there.
+Copy-Item $rc  (Join-Path $tmp "StringRipper.rc")  -Force
+Copy-Item (Join-Path $srcdir "StringRipper.ico") (Join-Path $tmp "StringRipper.ico") -Force
+Copy-Item (Join-Path $srcdir "version.h") (Join-Path $tmp "version.h") -Force
+$rctmp = Join-Path $tmp "StringRipper.rc"
+$rcc = "rc /nologo /I `"$srcdir`" /fo `"$res`" `"$rctmp`""
 $cl = "cl /nologo /std:c++20 /EHsc /O2 /Gy /GL /MT /W3 /DUNICODE /D_UNICODE /DSTRINGRIPPER_BUILD=$build /I `"$fxsrc`" `"$src`" `"$rb`" `"$res`" /Fe:`"$out`" /link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /MANIFEST:EMBED"
 # cd into a local temp dir so object files do not need a UNC-unfriendly /Fo.
 cmd /c "call `"$vcvars`" >nul 2>&1 && cd /d `"$tmp`" && $rcc && $cl"
