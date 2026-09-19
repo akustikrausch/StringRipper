@@ -98,6 +98,6 @@ The exe asks for nothing at startup, it runs as whoever started it (the manifest
 
 ## macOS / Linux
 
-The detection core is portable. `build-macos.sh` builds a universal CLI (arm64 min 11.0, x86_64 min 10.13) that scans files and folders; process memory stays Windows-only. Full details, including building both slices on an Apple Silicon Mac and the GitHub Actions route, are in [`docs/MACOS.md`](docs/MACOS.md).
+The detection core is portable. `build-macos.sh` builds a universal CLI (arm64 min 11.0, x86_64 min 10.15) that scans files and folders; process memory stays Windows-only. Full details, including building both slices on an Apple Silicon Mac and the GitHub Actions route, are in [`docs/MACOS.md`](docs/MACOS.md).
 
 Akustikrausch.

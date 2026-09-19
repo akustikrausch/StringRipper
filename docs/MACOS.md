@@ -2,7 +2,7 @@
 
 This is the handoff for building the macOS side of StringRipper. Read it once
 before touching a Mac; it says what already builds, what does not, and exactly
-how to produce the two binaries the ticket asks for (x86_64 ≥ 10.13, arm64 ≥ 11.0).
+how to produce the two binaries the ticket asks for (x86_64 ≥ 10.15, arm64 ≥ 11.0).
 
 ## What is portable, and what is not
 
@@ -36,14 +36,14 @@ So your M3 + macOS 27 can build everything the ticket wants:
 produces, in `dist/mac/`:
 
 - `stringripper-arm64`   — arm64, min macOS 11.0
-- `stringripper-x86_64`  — x86_64, min macOS 10.13 (no Metal; it is a CLI)
+- `stringripper-x86_64`  — x86_64, min macOS 10.15 (no Metal; it is a CLI)
 - `stringripper`         — universal (both slices via `lipo`)
 
 Verify the slices and the min-versions:
 
 ```bash
 lipo -info dist/mac/stringripper
-vtool -show-build dist/mac/stringripper-x86_64   # LC_VERSION_MIN → 10.13
+vtool -show-build dist/mac/stringripper-x86_64   # LC_VERSION_MIN → 10.15
 otool -l  dist/mac/stringripper-arm64 | grep -A3 LC_BUILD_VERSION
 ```
 
@@ -60,8 +60,12 @@ Macs it runs the x86_64 slice. So:
 - Or ship the two slices **separately** if you want the smallest download per
   arch. Both are produced above; it is a packaging choice, not a code one.
 
-The x86_64 slice at min 10.13 exists purely for **Intel Macs**; it is irrelevant
-to Apple Silicon and to the Rosetta question.
+The x86_64 slice at min 10.15 exists purely for **Intel Macs**; it is irrelevant
+to Apple Silicon and to the Rosetta question. 10.15 (not 10.13) is the real floor:
+`std::filesystem` - used throughout the portable core, not just for directory
+listing - needs libc++'s filesystem support, which Apple's SDK only ships from
+macOS 10.15 onward; anything older marks `std::filesystem::path` itself
+unavailable and the build won't compile.
 
 ## Run it
 
