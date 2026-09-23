@@ -28,6 +28,14 @@ int main() {
     CHECK(key != ur::comparisonContext("other", ur::Options{}));
     CHECK(ur::jsonString("\"\\\n\t") == "\"\\\"\\\\\\u000a\\u0009\"");
     CHECK(ur::csvField("a,\"b\"\r\n") == "\"a,\"\"b\"\"\r\n\"");
+    // CSV/formula injection (CWE-1236): a scanned value is attacker data by
+    // design. A field opened in Excel/Sheets that starts with =, +, -, @ or a
+    // tab is evaluated as a formula unless neutralized with a leading quote.
+    CHECK(ur::csvField("=cmd|'/c calc'!A1") == "\"'=cmd|'/c calc'!A1\"");
+    CHECK(ur::csvField("+1-1") == "\"'+1-1\"");
+    CHECK(ur::csvField("-1+1") == "\"'-1+1\"");
+    CHECK(ur::csvField("@SUM(1,1)") == "\"'@SUM(1,1)\"");
+    CHECK(ur::csvField("plain-value") == "\"plain-value\""); // unaffected: - not in first position
     CHECK(ur::exportResults({}, "json") == "[\n\n]\n");
     CHECK(ur::exportResults({}, "csv") ==
           "group,value,encoding,source,offset,context_before,context_after,captures\r\n");
