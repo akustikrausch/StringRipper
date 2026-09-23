@@ -57,6 +57,25 @@ int main() {
         require(delta.added[0].items[0].value == "KEY-43", "added diff");
         require(delta.removed[0].items[0].value == "KEY-42", "removed diff");
         require(delta.unchanged.empty(), "unchanged diff");
+
+        // Regression: loadSession() reconstructs groups by checking whether the
+        // previous row's group name differs (relies on findings being written
+        // contiguously per group, which saveSession's nested loop guarantees).
+        // Only ever exercised with one group before; lock in the multi-group case.
+        ur::Finding ga1{"a1", ur::Enc::Ascii, "s", "GroupA"};
+        ur::Finding ga2{"a2", ur::Enc::Ascii, "s", "GroupA"};
+        ur::Finding gb1{"b1", ur::Enc::Ascii, "s", "GroupB"};
+        ur::Finding gc1{"c1", ur::Enc::Ascii, "s", "GroupC"};
+        auto id3 = db.saveSession({0, "multi", "files", "",
+                                   {{"GroupA", {ga1, ga2}}, {"GroupB", {gb1}}, {"GroupC", {gc1}}}});
+        auto multi = db.loadSession(id3);
+        require(multi.groups.size() == 3, "multi-group session keeps distinct groups");
+        require(multi.groups[0].name == "GroupA" && multi.groups[0].items.size() == 2,
+                "multi-group session: first group intact");
+        require(multi.groups[1].name == "GroupB" && multi.groups[1].items.size() == 1,
+                "multi-group session: second group not merged into the first");
+        require(multi.groups[2].name == "GroupC" && multi.groups[2].items.size() == 1,
+                "multi-group session: third group intact");
     }
     fs::remove_all(root);
     std::cout << "workspace tests passed\n";
