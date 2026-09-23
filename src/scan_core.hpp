@@ -4,8 +4,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <regex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -36,6 +38,8 @@ struct Options {
     std::vector<std::string> schemes;   /* URL mode, empty = all */
     std::vector<std::string> presets;
     std::string customRegex;
+    std::string customLabel = "Custom";
+    std::vector<std::pair<std::string, std::string>> extraPatterns; // label, ECMAScript regex
     bool customWholeWord = false;
     bool caseInsensitive = false;
     bool dropCrap = true;               /* URL mode: drop placeholder/namespace noise */
@@ -46,7 +50,25 @@ struct Finding {
     Enc         enc;
     std::string source;
     std::string group;
+    uint64_t offset = 0;
+    bool hasOffset = false;
+    std::string before, after;
+    std::vector<std::pair<std::string, std::string>> captures;
 };
+
+inline std::string findingKey(const std::string& group, const std::string& value,
+                             const std::string& source, uint64_t offset, bool hasOffset) {
+    std::string key;
+    key.reserve(group.size() + value.size() + source.size() + 24);
+    key += group; key.push_back('\0');
+    key += value; key.push_back('\0');
+    key += source;
+    if (hasOffset) { key.push_back('\0'); key += std::to_string(offset); }
+    return key;
+}
+inline std::string findingKey(const Finding& f) {
+    return findingKey(f.group, f.value, f.source, f.offset, f.hasOffset);
+}
 
 struct Group {
     std::string name;
@@ -80,12 +102,12 @@ public:
 struct Sink {
     std::vector<Finding> items;
     std::unordered_set<std::string> seen;
-    void add(const std::string& value, Enc enc, const std::string& source, const std::string& group) {
-        std::string key = group;
-        key.push_back('\x01');
-        key += value;
-        if (!seen.insert(key).second) return;
-        items.push_back({value, enc, source, group});
+    void add(const std::string& value, Enc enc, const std::string& source, const std::string& group,
+             uint64_t offset = 0, bool hasOffset = false, std::string before = {},
+             std::string after = {}, std::vector<std::pair<std::string, std::string>> captures = {}) {
+        if (!seen.insert(findingKey(group, value, source, offset, hasOffset)).second) return;
+        items.push_back({value, enc, source, group, offset, hasOffset,
+                         std::move(before), std::move(after), std::move(captures)});
     }
 };
 
@@ -122,7 +144,7 @@ inline int b64val(char c) {
 }
 inline std::string decodeBase64(const std::string& s) {
     std::string out;
-    int val = 0, bits = 0;
+    uint32_t val = 0; int bits = 0;
     for (char c : s) {
         int d = b64val(c);
         if (d < 0) break;
@@ -146,24 +168,40 @@ inline std::string decodeHex(const std::string& s) {
 }
 
 inline void extractAscii(const uint8_t* d, std::size_t n, std::size_t minRun,
-                         std::vector<std::string>& out) {
-    std::string cur;
-    for (std::size_t i = 0; i < n; ++i) {
-        if (isPrintable(d[i])) cur.push_back(char(d[i]));
-        else { if (cur.size() >= minRun) out.push_back(cur); cur.clear(); }
+                         std::vector<std::string>& out, std::vector<std::size_t>* offsets = nullptr) {
+    std::size_t i = 0;
+    while (i < n) {
+        while (i < n && !isPrintable(d[i])) ++i;
+        const std::size_t start = i;
+        while (i < n && isPrintable(d[i])) ++i;
+        if (i - start >= minRun) {
+            out.emplace_back(reinterpret_cast<const char*>(d + start), i - start);
+            if (offsets) offsets->push_back(start);
+        }
     }
-    if (cur.size() >= minRun) out.push_back(cur);
 }
 inline void extractUtf16(const uint8_t* d, std::size_t n, bool le, std::size_t minRun,
-                         std::vector<std::string>& out) {
+                         std::vector<std::string>& out, std::vector<std::size_t>* offsets = nullptr) {
     std::string cur;
+    std::size_t start = 0;
     for (std::size_t i = 0; i + 1 < n; i += 2) {
         uint8_t lo = le ? d[i] : d[i + 1];
         uint8_t hi = le ? d[i + 1] : d[i];
-        if (hi == 0x00 && isPrintable(lo)) cur.push_back(char(lo));
-        else { if (cur.size() >= minRun) out.push_back(cur); cur.clear(); }
+        if (hi == 0x00 && isPrintable(lo)) {
+            if (cur.empty()) start = i;
+            cur.push_back(char(lo));
+        } else {
+            if (cur.size() >= minRun) {
+                out.push_back(cur);
+                if (offsets) offsets->push_back(start);
+            }
+            cur.clear();
+        }
     }
-    if (cur.size() >= minRun) out.push_back(cur);
+    if (cur.size() >= minRun) {
+        out.push_back(cur);
+        if (offsets) offsets->push_back(start);
+    }
 }
 
 template <typename Pred, typename Dec>
@@ -285,23 +323,80 @@ inline bool looksCrap(const std::string& h) {
 
 class Detector {
 public:
+    static std::pair<std::string, std::vector<std::pair<std::size_t, std::string>>>
+    namedGroups(const std::string& pattern) {
+        std::string result;
+        std::vector<std::pair<std::size_t, std::string>> names;
+        std::size_t group = 0;
+        bool inClass = false;
+        for (std::size_t i = 0; i < pattern.size(); ++i) {
+            char c = pattern[i];
+            if (c == '\\' && i + 1 < pattern.size()) {
+                result += c; result += pattern[++i]; continue;
+            }
+            if (c == '[') inClass = true;
+            if (c == ']') inClass = false;
+            if (c == '(' && !inClass) {
+                if (pattern.compare(i, 3, "(?<") == 0) {
+                    auto end = pattern.find('>', i + 3);
+                    if (end == std::string::npos) throw RegexError("named group has no closing >");
+                    auto name = pattern.substr(i + 3, end - i - 3);
+                    if (name.empty() || !(std::isalpha(static_cast<unsigned char>(name[0])) || name[0] == '_'))
+                        throw RegexError("invalid named group");
+                    for (char ch : name)
+                        if (!std::isalnum(static_cast<unsigned char>(ch)) && ch != '_')
+                            throw RegexError("invalid named group");
+                    names.push_back({++group, name});
+                    result += '('; i = end; continue;
+                }
+                if (pattern.compare(i, 2, "(?") != 0) ++group;
+            }
+            result += c;
+        }
+        return {result, names};
+    }
+
     explicit Detector(Options opt) : opt_(std::move(opt)) {
         urlMode_ = (opt_.mode == Mode::Urls);
         if (!urlMode_) {
             auto flags = std::regex::ECMAScript | std::regex::optimize;
+#ifdef __GLIBCXX__
+            // libstdc++ otherwise chooses its recursive DFS executor. A long
+            // printable process-memory run can overflow a worker's stack.
+            // Polynomial mode selects its queue-based executor and rejects
+            // backreferences, which cannot be evaluated with that guarantee.
+            flags |= std::regex_constants::__polynomial;
+#endif
             if (opt_.caseInsensitive) flags |= std::regex::icase;
+            auto compile = [&](const std::string& pattern, const std::string& label) {
+                if (pattern.size() > 512)
+                    throw RegexError(label + ": regex exceeds the 512-byte safety limit");
+                try { matchers_.emplace_back(pattern, flags); }
+                catch (const std::regex_error& e) { throw RegexError(label + ": " + e.what()); }
+            };
             for (const auto& id : opt_.presets)
                 for (const auto& p : builtinPresets())
                     if (p.id == id) {
-                        try { matchers_.emplace_back(p.pattern, flags); }
-                        catch (const std::regex_error& e) { throw RegexError("preset " + id + ": " + e.what()); }
+                        compile(p.pattern, "preset " + id);
                         names_.push_back(p.label);
+                        captures_.emplace_back();
+                        hints_.push_back(id == "email" ? '@' : id == "ipv4" || id == "fileurl" ? '.' :
+                                         id == "ipv6" ? ':' : id == "guid" ? '-' :
+                                         id == "filepath" ? '\\' : '\0');
                     }
             if (!opt_.customRegex.empty()) {
-                std::string pat = opt_.customWholeWord ? ("\\b(?:" + opt_.customRegex + ")\\b") : opt_.customRegex;
-                try { matchers_.emplace_back(pat, flags); }
-                catch (const std::regex_error& e) { throw RegexError(std::string("custom regex: ") + e.what()); }
-                names_.push_back("Custom");
+                auto [plain, names] = namedGroups(opt_.customRegex);
+                std::string pat = opt_.customWholeWord ? ("\\b(?:" + plain + ")\\b") : plain;
+                compile(pat, "custom regex");
+                names_.push_back(opt_.customLabel.empty() ? "Custom" : opt_.customLabel);
+                captures_.push_back(std::move(names));
+                hints_.push_back('\0');
+            }
+            for (const auto& [label, pattern] : opt_.extraPatterns) {
+                auto [plain, names] = namedGroups(pattern);
+                compile(plain, label);
+                names_.push_back(label); captures_.push_back(std::move(names));
+                hints_.push_back('\0');
             }
             if (matchers_.empty()) throw RegexError("no pattern selected");
         }
@@ -309,16 +404,34 @@ public:
 
     bool urlMode() const { return urlMode_; }
 
-    void scan(const uint8_t* data, std::size_t n, const std::string& source, Sink& sink) const {
+    void testText(const std::string& text, Sink& sink) const {
+        std::size_t start = 0;
+        while (start <= text.size()) {
+            auto end = text.find('\n', start);
+            auto line = text.substr(start, end == std::string::npos ? end : end - start);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            match(line, Enc::Ascii, "Sample", sink);
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+    }
+
+    void scan(const uint8_t* data, std::size_t n, const std::string& source, Sink& sink,
+              uint64_t baseOffset = 0, bool knownOffset = false) const {
         std::vector<std::string> ascii;
-        detail::extractAscii(data, n, opt_.minRun, ascii);
-        for (const auto& s : ascii) match(s, Enc::Ascii, source, sink);
+        std::vector<std::size_t> asciiOffsets;
+        if (opt_.ascii || opt_.base64 || opt_.hex)
+            detail::extractAscii(data, n, opt_.minRun, ascii, &asciiOffsets);
+        if (opt_.ascii) for (std::size_t i = 0; i < ascii.size(); ++i)
+            match(ascii[i], Enc::Ascii, source, sink, baseOffset + asciiOffsets[i], knownOffset);
 
         std::vector<std::string> wide;
+        std::vector<std::size_t> wideOffsets;
         if (opt_.utf16) {
-            detail::extractUtf16(data, n, true, opt_.minRun, wide);
-            detail::extractUtf16(data, n, false, opt_.minRun, wide);
-            for (const auto& s : wide) match(s, Enc::Utf16, source, sink);
+            detail::extractUtf16(data, n, true, opt_.minRun, wide, &wideOffsets);
+            detail::extractUtf16(data, n, false, opt_.minRun, wide, &wideOffsets);
+            for (std::size_t i = 0; i < wide.size(); ++i)
+                match(wide[i], Enc::Utf16, source, sink, baseOffset + wideOffsets[i], knownOffset, 2);
         }
 
         if (opt_.base64 || opt_.hex) {
@@ -347,13 +460,15 @@ private:
         for (const auto& s : runs) match(s, enc, source, sink);
     }
 
-    void match(const std::string& s, Enc enc, const std::string& source, Sink& sink) const {
+    void match(const std::string& s, Enc enc, const std::string& source, Sink& sink,
+               uint64_t runOffset = 0, bool knownOffset = false, std::size_t stride = 1) const {
         if (s.size() > opt_.maxCandidate) return;
-        if (urlMode_) matchUrls(s, enc, source, sink);
-        else matchRegex(s, enc, source, sink);
+        if (urlMode_) matchUrls(s, enc, source, sink, runOffset, knownOffset, stride);
+        else matchRegex(s, enc, source, sink, runOffset, knownOffset, stride);
     }
 
-    void matchUrls(const std::string& s, Enc enc, const std::string& source, Sink& sink) const {
+    void matchUrls(const std::string& s, Enc enc, const std::string& source, Sink& sink,
+                   uint64_t runOffset, bool knownOffset, std::size_t stride) const {
         std::size_t pos = 0;
         while ((pos = s.find("://", pos)) != std::string::npos) {
             std::size_t start = pos;
@@ -370,18 +485,52 @@ private:
                 !(opt_.dropCrap && detail::looksCrap(host)) &&
                 (opt_.schemes.empty() ||
                  std::find(opt_.schemes.begin(), opt_.schemes.end(), scheme) != opt_.schemes.end()))
-                sink.add(url, enc, source, host);
+                sink.add(url, enc, source, host, runOffset + start * stride, knownOffset,
+                         s.substr(start > 32 ? start - 32 : 0, std::min<std::size_t>(32, start)),
+                         s.substr(start + url.size(), 32));
             pos = end;
         }
     }
 
-    void matchRegex(const std::string& s, Enc enc, const std::string& source, Sink& sink) const {
+    void matchRegex(const std::string& s, Enc enc, const std::string& source, Sink& sink,
+                    uint64_t runOffset, bool knownOffset, std::size_t stride) const {
+        // Bound each regex invocation independently of the printable-run size.
+        // Overlapping windows preserve ordinary matches crossing a boundary,
+        // while preventing long homogeneous process-memory strings from making
+        // even the polynomial executor needlessly expensive.
+        constexpr std::size_t window = 1024, step = 512;
         for (std::size_t i = 0; i < matchers_.size(); ++i) {
-            auto begin = std::sregex_iterator(s.begin(), s.end(), matchers_[i]);
-            auto end = std::sregex_iterator();
-            for (auto it = begin; it != end; ++it) {
-                std::string v = it->str();
-                if (!v.empty()) sink.add(v, enc, source, names_[i]);
+            for (std::size_t base = 0; base < s.size(); base += step) {
+                const std::size_t limit = std::min(s.size(), base + window);
+                if (hints_[i] && std::find(s.begin() + base, s.begin() + limit, hints_[i]) == s.begin() + limit) {
+                    if (limit == s.size()) break;
+                    continue;
+                }
+                auto flags = std::regex_constants::match_default;
+                if (base) flags |= std::regex_constants::match_prev_avail;
+                if (limit < s.size()) flags |= std::regex_constants::match_not_eol |
+                                               std::regex_constants::match_not_eow;
+                auto begin = std::sregex_iterator(s.begin() + base, s.begin() + limit,
+                                                  matchers_[i], flags);
+                auto end = std::sregex_iterator();
+                for (auto it = begin; it != end; ++it) {
+                    std::string v = it->str();
+                    auto pos = base + static_cast<std::size_t>(it->position());
+                    // Only the first half of a non-final window owns its
+                    // matches. The overlap supplies context for the next one.
+                    if (!v.empty() && v.size() <= step &&
+                        (!base || pos != base) &&
+                        (limit == s.size() || pos <= base + step)) {
+                        std::vector<std::pair<std::string, std::string>> captures;
+                        for (const auto& [index, name] : captures_[i])
+                            if (index < it->size() && (*it)[index].matched)
+                                captures.push_back({name, (*it)[index].str()});
+                        sink.add(v, enc, source, names_[i], runOffset + pos * stride, knownOffset,
+                                 s.substr(pos > 32 ? pos - 32 : 0, std::min<std::size_t>(32, pos)),
+                                 s.substr(pos + v.size(), 32), std::move(captures));
+                    }
+                }
+                if (limit == s.size()) break;
             }
         }
     }
@@ -390,21 +539,20 @@ private:
     bool urlMode_ = true;
     std::vector<std::regex> matchers_;
     std::vector<std::string> names_;
+    std::vector<std::vector<std::pair<std::size_t, std::string>>> captures_;
+    std::vector<char> hints_; // required delimiters in selected built-in patterns
 };
 
 inline std::vector<Group> mergeSinks(std::vector<Sink>& sinks) {
     std::unordered_set<std::string> seen;
+    std::unordered_map<std::string, std::size_t> groupIndex;
     std::vector<Group> groups;
     for (auto& sk : sinks) {
         for (auto& f : sk.items) {
-            std::string key = f.group;
-            key.push_back('\x01');
-            key += f.value;
-            if (!seen.insert(key).second) continue;
-            auto it = std::find_if(groups.begin(), groups.end(),
-                                   [&](const Group& g) { return g.name == f.group; });
-            if (it == groups.end()) groups.push_back({f.group, {f}});
-            else it->items.push_back(f);
+            if (!seen.insert(findingKey(f)).second) continue;
+            auto [it, inserted] = groupIndex.try_emplace(f.group, groups.size());
+            if (inserted) groups.push_back({f.group, {}});
+            groups[it->second].items.push_back(std::move(f));
         }
     }
     auto desc = [](const std::string& a, const std::string& b) {

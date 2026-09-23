@@ -11,16 +11,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SRC=src/cli_main.cpp
+SRC="src/cli_main.cpp src/session_store.cpp"
 OUT=dist/mac
 mkdir -p "$OUT"
 FLAGS="-std=c++20 -O2 -Isrc -DNDEBUG -Wall"
 
 echo "arm64  (min macOS 11.0)"
-clang++ $FLAGS -arch arm64  -mmacosx-version-min=11.0  "$SRC" -o "$OUT/stringripper-arm64"
+clang++ $FLAGS -arch arm64  -mmacosx-version-min=11.0  $SRC -lsqlite3 -o "$OUT/stringripper-arm64"
 
 echo "x86_64 (min macOS 10.15)"
-clang++ $FLAGS -arch x86_64 -mmacosx-version-min=10.15 "$SRC" -o "$OUT/stringripper-x86_64"
+clang++ $FLAGS -arch x86_64 -mmacosx-version-min=10.15 $SRC -lsqlite3 -o "$OUT/stringripper-x86_64"
 
 echo "universal (lipo)"
 lipo -create -output "$OUT/stringripper" "$OUT/stringripper-arm64" "$OUT/stringripper-x86_64"

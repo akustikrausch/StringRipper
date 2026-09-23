@@ -5,26 +5,32 @@
 # to the sibling folder ..\VST-Player.
 #
 # Usage: pwsh -File build.ps1
+param([string]$OutDir, [string]$SourceDir)
 $ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$root = if ($SourceDir) { $SourceDir } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
 $fx = if ($env:FXCHAINPLAYER_DIR) { $env:FXCHAINPLAYER_DIR } else { Join-Path $root "..\VST-Player" }
 $fxsrc = Join-Path $fx "src"
 $rb = Join-Path $fxsrc "audio\rip_backend_win32.cpp"
+$sqlite = Join-Path $fx "third_party\sqlite\sqlite3.c"
 if (-not (Test-Path $rb)) {
     throw "FXChainPlayer source not found at '$fxsrc'. Set FXCHAINPLAYER_DIR to your FXChainPlayer checkout."
 }
+if (-not (Test-Path $sqlite)) { throw "SQLite source not found at '$sqlite'." }
 
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 $inst = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 $vcvars = Join-Path $inst "VC\Auxiliary\Build\vcvars64.bat"
 if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found. Install the MSVC C++ build tools." }
 
-New-Item -ItemType Directory -Force -Path (Join-Path $root "bin") | Out-Null
+if (-not $OutDir) { $OutDir = Join-Path $root "bin" }
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $srcdir = Join-Path $root "src"
 $src = Join-Path $srcdir "main.cpp"
+$store = Join-Path $srcdir "session_store.cpp"
 $rc  = Join-Path $srcdir "StringRipper.rc"
-$out = Join-Path $root "bin\StringRipper.exe"
+$out = Join-Path $OutDir "StringRipper.exe"
+$preset = Join-Path $root "regex-user-presets.ini"
 $tmp = $env:TEMP
 $res = Join-Path $tmp "StringRipper.res"
 $build = Get-Date -Format "yyyyMMddHHmm"   # build number = build timestamp
@@ -36,7 +42,7 @@ Copy-Item (Join-Path $srcdir "StringRipper.ico") (Join-Path $tmp "StringRipper.i
 Copy-Item (Join-Path $srcdir "version.h") (Join-Path $tmp "version.h") -Force
 $rctmp = Join-Path $tmp "StringRipper.rc"
 $rcc = "rc /nologo /I `"$srcdir`" /fo `"$res`" `"$rctmp`""
-$cl = "cl /nologo /std:c++20 /EHsc /O2 /Gy /GL /MT /W3 /DUNICODE /D_UNICODE /DSTRINGRIPPER_BUILD=$build /I `"$fxsrc`" `"$src`" `"$rb`" `"$res`" /Fe:`"$out`" /link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /MANIFEST:EMBED"
+$cl = "cl /nologo /std:c++20 /EHsc /O2 /Gy /GL /MT /W3 /DUNICODE /D_UNICODE /DSTRINGRIPPER_BUILD=$build /I `"$fxsrc`" /I `"$(Join-Path $fx 'third_party\sqlite')`" `"$src`" `"$store`" `"$rb`" `"$sqlite`" `"$res`" /Fe:`"$out`" /link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /MANIFEST:EMBED"
 # cd into a local temp dir so object files do not need a UNC-unfriendly /Fo.
 cmd /c "call `"$vcvars`" >nul 2>&1 && cd /d `"$tmp`" && $rcc && $cl"
 if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }
@@ -56,4 +62,6 @@ if ($env:SR_SIGN_THUMBPRINT -or $env:SR_SIGN_PFX) {
     Write-Host "signed $out"
 }
 Write-Host "built $out  (reused FXChainPlayer ripper from $fxsrc)"
+$presetOut = Join-Path $OutDir "regex-user-presets.ini"
+if (-not (Test-Path $presetOut)) { Copy-Item $preset $presetOut }
 Get-Item $out | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize | Out-String

@@ -25,6 +25,9 @@ last section before committing to it.
 
 ## Build both slices on your M3 (no Rosetta needed)
 
+The CLI's local session and job store links the macOS system SQLite library.
+The universal build script compiles the store adapter into both slices.
+
 Rosetta is only for *running* x86_64 code on Apple Silicon. **Compiling** an
 x86_64 slice on an M3 is just a target flag — the macOS SDK carries both slices.
 So your M3 + macOS 27 can build everything the ticket wants:

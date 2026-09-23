@@ -8,11 +8,14 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <fstream>
+#include <chrono>
 
 namespace {
 struct MockReader : fxchain::IMemoryReader {
     std::vector<uint8_t> mem;
     uint64_t base = 0x100000;
+    bool readFails = false;
     uint64_t minimumAddress() const override { return base; }
     uint64_t maximumAddress() const override { return base + mem.size(); }
     bool query(uint64_t a, fxchain::RipMemoryRegion& r) override {
@@ -23,6 +26,7 @@ struct MockReader : fxchain::IMemoryReader {
         return true;
     }
     fxchain::RipReadResult read(uint64_t a, uint8_t* d, size_t n) override {
+        if (readFails) return {0, false};
         if (a < base) return {0, false};
         size_t off = static_cast<size_t>(a - base);
         if (off >= mem.size()) return {0, false};
@@ -51,13 +55,66 @@ int main() {
     ur::Options o; // URL mode
     ur::Detector det(o);
     ur::DriverLimits lim;
-    ur::ScanPool pool(det, 0, 128u * 1024 * 1024);
-    uint64_t bytes = ur::scanReaderInto(rd, pool, "mock", lim, {});
+    ur::ScanProgress state;
+    ur::ScanPool pool(det, 0, 128u * 1024 * 1024, &state);
+    uint64_t bytes = ur::scanReaderInto(rd, pool, "mock", lim, {}, &state);
     auto groups = pool.finish();
+    if (state.total != rd.mem.size() || state.completed != bytes || state.skipped || state.planning ||
+        !state.merging || state.percent() != 100.0) {
+        std::puts("FAIL: progress counts completed fresh bytes, not overlaps"); ++fail;
+    }
+    {
+        ur::DriverLimits small; small.maxBytes = 12345; small.window = 4096; small.overlap = 128;
+        ur::ScanProgress capped;
+        ur::ScanPool p(det, 2, 8192, &capped);
+        auto n = ur::scanReaderInto(rd, p, "limited", small, {}, &capped);
+        p.finish();
+        if (n != 12345 || capped.total != n || capped.completed != n) {
+            std::puts("FAIL: memory limit and progress must be exact"); ++fail;
+        }
+    }
+    {
+        bool cancel = true;
+        ur::ScanProgress cancelled;
+        ur::ScanPool p(det, 2, 8192, &cancelled, [&] { return cancel; });
+        auto n = ur::scanReaderInto(rd, p, "cancelled", lim, {}, &cancelled);
+        p.finish();
+        if (n || cancelled.completed) { std::puts("FAIL: pre-cancelled scan did work"); ++fail; }
+    }
 
     std::printf("scanned %llu bytes, %zu groups, %zu findings\n",
                 (unsigned long long)bytes, groups.size(), ur::countFindings(groups));
     bool found = false;
+    {
+        MockReader gone; gone.mem.resize(8192); gone.readFails = true;
+        ur::ScanProgress changed;
+        ur::ScanPool p(det, 2, 8192, &changed);
+        ur::scanReaderInto(gone, p, "gone", lim, {}, &changed);
+        p.finish();
+        if (changed.total != 8192 || changed.completed != 0 || changed.skipped != 8192) {
+            std::puts("FAIL: unreadable memory must not count as scanned"); ++fail;
+        }
+    }
+    {
+        auto path = std::filesystem::temp_directory_path() /
+            ("stringripper-file-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        { std::ofstream f(path, std::ios::binary); f.write((const char*)rd.mem.data(), 12345); }
+        ur::ScanProgress fileProgress;
+        ur::ScanPool p(det, 2, 8192, &fileProgress);
+        ur::DriverLimits small; small.window = 4096; small.overlap = 128;
+        if (!ur::scanFileInto(path, p, small)) ++fail;
+        p.finish();
+        if (fileProgress.completed != 12345) { std::puts("FAIL: file progress includes overlap"); ++fail; }
+        ur::ScanProgress cancelled;
+        ur::ScanPool q(det, 2, 8192, &cancelled, [] { return true; });
+        ur::scanFileInto(path, q, small); q.finish();
+        if (cancelled.completed) { std::puts("FAIL: cancelled file was scanned"); ++fail; }
+        ur::ScanProgress snapshot;
+        ur::ScanPool bounded(det, 2, 8192, &snapshot);
+        ur::scanFileInto(path, bounded, small, {}, 5000); bounded.finish();
+        if (snapshot.completed != 5000) { std::puts("FAIL: file size snapshot exceeded"); ++fail; }
+        std::filesystem::remove(path);
+    }
     for (auto& g : groups) if (g.name == "host0.example.com") found = true;
     if (!found) { std::printf("FAIL: expected domain not found\n"); ++fail; }
     if (groups.size() != 500) { std::printf("FAIL: expected 500 domains, got %zu\n", groups.size()); ++fail; }
