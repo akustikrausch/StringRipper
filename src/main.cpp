@@ -1397,6 +1397,7 @@ LRESULT CALLBACK WorkspaceProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             LBS_EXTENDEDSEL | WS_BORDER | WS_VSCROLL | WS_HSCROLL, 14, 38, 626, 132);
         peCtl(h, L"STATIC", L"Name", 0, 0, 14, 180, 70, 22);
         g_wsName = peCtl(h, L"EDIT", L"My scan", WS_NAME, ES_AUTOHSCROLL | WS_BORDER, 82, 177, 268, 28);
+        SendMessageW(g_wsName, EM_LIMITTEXT, 200, 0);  // used as both a session and a job name
         peCtl(h, L"BUTTON", L"Save current", WS_SAVE_SESSION, BS_PUSHBUTTON, 360, 177, 122, 28);
         peCtl(h, L"BUTTON", L"Open", WS_OPEN_SESSION, BS_PUSHBUTTON, 490, 177, 72, 28);
         peCtl(h, L"BUTTON", L"Compare", WS_COMPARE, BS_PUSHBUTTON, 570, 177, 70, 28);
@@ -1477,9 +1478,18 @@ LRESULT CALLBACK WorkspaceProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (id == WS_RUN_JOB) {
                 int selected = (int)SendMessageW(g_wsJobs, LB_GETCURSEL, 0, 0);
                 if (selected < 0) throw std::runtime_error("Select a job");
-                wchar_t name[256]{}; SendMessageW(g_wsJobs, LB_GETTEXT, selected, (LPARAM)name);
+                // LB_GETTEXT has no length limit of its own -- unlike controlText()'s
+                // GetWindowText pattern, it writes the whole string into the caller's
+                // buffer with no bound. A job name (free text, saved to SQLite, no
+                // length cap on that path either) longer than a fixed stack buffer
+                // here overflowed it. Size the buffer from LB_GETTEXTLEN first.
+                int len = (int)SendMessageW(g_wsJobs, LB_GETTEXTLEN, selected, 0);
+                if (len == LB_ERR) throw std::runtime_error("Could not read the job name");
+                std::wstring name(static_cast<std::size_t>(len) + 1, L'\0');
+                SendMessageW(g_wsJobs, LB_GETTEXT, selected, (LPARAM)name.data());
+                name.resize(static_cast<std::size_t>(len));
                 ur::SessionStore db(workspaceDatabase());
-                auto job = db.loadJob(narrow(name));
+                auto job = db.loadJob(narrow(name.c_str()));
                 if (!job) throw std::runtime_error("Job is missing or invalid");
                 wsApplyOptions(job->options);
                 g_fileSelection = job->files;
