@@ -516,10 +516,21 @@ private:
                 if (base) flags |= std::regex_constants::match_prev_avail;
                 if (limit < s.size()) flags |= std::regex_constants::match_not_eol |
                                                std::regex_constants::match_not_eow;
-                auto begin = std::sregex_iterator(s.begin() + base, s.begin() + limit,
-                                                  matchers_[i], flags);
-                auto end = std::sregex_iterator();
-                for (auto it = begin; it != end; ++it) {
+                // Even the polynomial executor can refuse a specific window: real
+                // process memory occasionally builds an automaton x input pair
+                // libstdc++ judges too complex and throws error_complexity for,
+                // same spirit as the size/length guards elsewhere in this
+                // function. One dense window failing must not lose every other
+                // finding already queued for this whole scan, so it is skipped
+                // like a non-matching window, not fatal to the caller.
+                std::sregex_iterator it, end;
+                try {
+                    it = std::sregex_iterator(s.begin() + base, s.begin() + limit, matchers_[i], flags);
+                } catch (const std::regex_error&) {
+                    if (limit == s.size()) break;
+                    continue;
+                }
+                for (; it != end; ) {
                     std::string v = it->str();
                     auto pos = base + static_cast<std::size_t>(it->position());
                     // Only the first half of a non-final window owns its
@@ -535,6 +546,9 @@ private:
                                  s.substr(pos > 32 ? pos - 32 : 0, std::min<std::size_t>(32, pos)),
                                  s.substr(pos + v.size(), 32), std::move(captures));
                     }
+                    // Advancing performs the next search; it can throw the same
+                    // way construction can. Stop this window, not the scan.
+                    try { ++it; } catch (const std::regex_error&) { break; }
                 }
                 if (limit == s.size()) break;
             }
