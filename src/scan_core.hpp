@@ -337,7 +337,13 @@ public:
             if (c == '[') inClass = true;
             if (c == ']') inClass = false;
             if (c == '(' && !inClass) {
-                if (pattern.compare(i, 3, "(?<") == 0) {
+                // (?<name>...) is a named group; (?<=...) / (?<!...) are look-
+                // behind assertions and must fall through untouched, or a
+                // legitimate lookbehind gets misparsed as a malformed name.
+                bool namedGroup = pattern.compare(i, 3, "(?<") == 0 &&
+                                  i + 3 < pattern.size() &&
+                                  pattern[i + 3] != '=' && pattern[i + 3] != '!';
+                if (namedGroup) {
                     auto end = pattern.find('>', i + 3);
                     if (end == std::string::npos) throw RegexError("named group has no closing >");
                     auto name = pattern.substr(i + 3, end - i - 3);

@@ -245,6 +245,31 @@ int main() {
         }
     }
 
+    // Regression (audit finding): namedGroups() used to treat a lookbehind
+    // assertion, (?<=...) / (?<!...), as a malformed named group and reject
+    // it with "named group has no closing >" -- a confusing diagnosis of the
+    // wrong problem. std::regex's ECMAScript grammar does not support
+    // lookbehind at all (a library limitation, not something this preprocessor
+    // can fix), so the pattern still must not compile -- but it must fail in
+    // the actual regex compiler on its own terms, and a real named group
+    // elsewhere in the same pattern must still parse correctly either way.
+    {
+        auto rejectsAsLookbehind = [](const std::string& pattern) {
+            try { ur::Options o; o.mode = ur::Mode::Regex; o.customRegex = pattern; ur::Detector d(o); return false; }
+            catch (const ur::RegexError& e) {
+                std::string w = e.what();
+                return w.find("named group") == std::string::npos; // not misattributed
+            }
+        };
+        CHECK(rejectsAsLookbehind("(?<=foo)bar"), "lookbehind rejected on its own terms, not as a bad named group");
+        CHECK(rejectsAsLookbehind("(?<!foo)bar"), "negative lookbehind rejected on its own terms, not as a bad named group");
+        // a real named group must still parse when the pattern is otherwise fine
+        ur::Options o; o.mode = ur::Mode::Regex; o.customRegex = "(?<id>[0-9]+)";
+        bool ok = true;
+        try { ur::Detector d(o); } catch (const ur::RegexError&) { ok = false; }
+        CHECK(ok, "named group still parses after the lookbehind fix");
+    }
+
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", failures);
     return failures ? 1 : 0;
 }
