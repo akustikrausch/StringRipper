@@ -1,66 +1,59 @@
 # StringRipper
 
-Small Windows tool for ripping strings out of running processes, files or whole folders. 
+Small Windows tool for ripping strings out of running processes, files or whole folders.
 
 Give it a process and it digs through readable memory looking for URLs or whatever regex you throw at it. Works with ASCII/ANSI/UTF-8, UTF-16 LE/BE and also unwraps one layer of Base64 or hex along the way.
 
 One portable exe. No installer, no DLL mess. It's unsigned for now.
 
-It deduplicates overlap windows while retaining distinct source locations, groups by domain/pattern and sorts Z-A.
+Dedups overlap windows (hits from different sources stay separate), groups by domain or pattern, sorts Z-A.
 
 URL mode knows http/https, ftp, ws, rtsp, rtmp, mms, udp etc. I made the URL detector a bit picky on purpose. The host has to look real, so random memory garbage containing `://` doesn't flood the results.
 
-Regex mode has a few presets for the usual stuff: email, IPv4/IPv6, GUIDs, API keys, file paths... or give it your own ECMAScript regex.
+Regex mode has presets for the usual stuff: email, IPv4/IPv6, GUIDs, API keys, file paths, download URLs... or give it your own ECMAScript regex.
 
-Version 1.2 adds user presets. Put `regex-user-presets.ini` beside `StringRipper.exe` and the first preset is loaded automatically at startup. The **User presets...** browser can create, edit, validate, save and activate presets, including decoder and built-in regex-mode switches. Every save writes a temporary file first and keeps the previous settings as `regex-user-presets.ini.bak`; a damaged main file is recovered from that backup automatically.
+## User presets
 
-Four more additions in 1.2:
+Put `regex-user-presets.ini` next to the exe and the first preset loads at startup. **User presets...** creates, edits, validates and saves them, decoder and built-in switches included. Unsaved edits stay until you save or discard.
 
-- **Test sample** in the preset editor runs the selected patterns against example text, one candidate per line. It shows distinct matches grouped by pattern. This tests the patterns directly, without decoding the sample; input is limited to 2048 characters and is not saved in the INI.
-- **Export...** offers TXT, CSV and JSON. CSV/JSON include group, value, encoding and source. Exports contain exactly the currently filtered view.
-- **New only** compares two complete scans of the same source with the same scan options. It compares group and value, ignoring changed addresses/encodings. The first successful scan establishes a baseline; cancelled, failed or incomplete scans never replace it. Clear resets the comparison. Only the most recent successful baseline is kept in memory.
-- **CLI user presets** work on Windows, macOS and Linux: list presets or select one by exact name. Explicit regex/decoder switches override the preset regardless of argument order. The CLI only loads a preset when requested.
+Presets can carry example lines. **Test sample** runs the patterns against pasted text (2048 chars, not saved), **Run saved cases** checks every saved line, **Add to profile** stacks presets into one scan.
 
-The editor preserves unsaved changes until you choose to save or discard them. Builds only install the starter file when no settings file exists. In the INI, backslashes are doubled; `\n` and `\r` encode line breaks. The editor accepts ordinary regex syntax and handles that escaping automatically.
+Every save goes to a temp file first and the old file stays as `regex-user-presets.ini.bak`. A broken ini gets restored from it. Builds only drop the starter file when there is none.
 
-## Workspace in 1.2.0
-
-The **Workspace...** browser saves and reopens scan sessions in a local SQLite database, compares two saved sessions side by side (added, removed, unchanged), and saves/runs named jobs. The default GUI database is `%LOCALAPPDATA%\StringRipper\workspace.sqlite`; results stay on the local machine. Favorite processes or paths can be added and reselected there. The **Dashboard** summarizes findings by pattern, source and encoding.
-
-Each direct ASCII/UTF-16 finding carries its byte offset or memory address, a short surrounding context and any named regex captures such as `(?<version>...)`. Double-click a result for details; right-click it to inspect bytes at the offset, open its source file or favorite that source. Decoded Base64/hex matches do not claim a direct source offset.
-
-**Scan settings...** filters files by include/exclude glob, size and modification date (YYYY-MM-DD), or restricts scanning to a byte/address range. Comma-separated patterns such as `*.txt,*.log` and relative folder patterns such as `logs/*.txt` are supported. **Pause/Resume** stops both producer and workers without losing queued work. **Live** periodically rescans at the entered interval in seconds; the status reports added, removed and unchanged findings. Results are displayed 500 at a time and can be searched by value, pattern, source or encoding. The export dialog can append the filtered view as a SQLite session as well as write TXT/CSV/JSON; structured exports include offsets, context and captures.
-
-Regex presets can now store positive and negative example lines. **Run saved cases** checks every line, while **Add to profile** combines several presets for one scan. Reusable jobs persist the chosen sources, profile, file selection and live interval.
-
-Regex process scans use bounded, overlapping 1024-character windows and return matches up to 512 characters. Regex patterns are limited to 512 bytes. The MinGW/libstdc++ release uses a non-recursive polynomial matcher; backreferences such as `(a)\1` are rejected because they cannot be handled safely by that matcher. These limits protect scans of long printable memory runs from stack overflows.
-
-The release includes a neutral starter file with ticket-ID and semantic-version examples. Each preset uses one ordinary INI section:
+One section per preset, only `Regex` is required. Backslashes are doubled in the file, `\n` and `\r` stand for line breaks. The editor does the escaping for you.
 
 ```ini
 [Regex User Preset: Support ticket IDs]
-Description=Find ticket references such as TKT-123456 in text and log files.
+Description=Find ticket references such as TKT-123456.
 Regex=\\bTKT-[0-9]{6}\\b
 Positive=TKT-123456
 Negative=ABC-123456
-Validated=1
-
 ASCII=1
 UTF-16=1
 HEX=0
 BASE64=0
-
 Custom=1
-Email=0
-IPv4=0
-IPv6=0
-GUID=0
-APIKey=0
-Filepath=0
-Download=0
 ```
 
-The result filter narrows by group, value, source or encoding, and only the filtered view is exported. Pagination affects display, not export.
+`Email`, `IPv4`, `IPv6`, `GUID`, `APIKey`, `Filepath` and `Download` switch the built-in patterns on (1) or off (0).
+
+## Workspace
+
+**Workspace...** keeps scan sessions in a local SQLite file (`%LOCALAPPDATA%\StringRipper\workspace.sqlite`), compares two sessions side by side (added, removed, unchanged) and saves named jobs: sources, profile, file filter, live interval. Favorite processes and paths live there too. **Dashboard** counts findings by pattern, source and encoding. Nothing leaves your machine.
+
+Direct ASCII/UTF-16 hits carry their file offset or memory address, a bit of context and named captures like `(?<version>...)`. Double-click a hit for details, right-click to inspect the bytes, open the source file or favorite the source. Decoded Base64/hex hits don't claim an offset.
+
+**Scan settings...** filters files by include/exclude glob (`*.txt,*.log`, `logs/*.txt`), size, modified date (YYYY-MM-DD) or byte/address range. **Pause/Resume** freezes producer and workers without losing queued work. **Live** rescans every N seconds and tells you what got added, removed, unchanged. **New only** shows what appeared since the last complete scan of the same source with the same options. Cancelled or failed scans never replace that baseline, Clear resets it.
+
+Results show 500 at a time. Filter by value, pattern, source or encoding.
+
+## Regex limits
+
+Regex scans run in overlapping 1024-char windows. Hits over 512 chars aren't returned, patterns over 512 bytes are refused. When the regex engine gives up on a window (complexity or stack limit) that window is skipped and the scan goes on. A nasty pattern can miss hits, it can't take the scan down. libstdc++ builds (MinGW, Linux) force its non-recursive matcher, which also rejects backreferences like `(a)\1`. The MSVC build accepts them.
+
+## Export
+
+**Export...** writes TXT, CSV, JSON or appends a SQLite session, and only what the filter currently shows. Paging is display only. CSV/JSON carry offsets, context and captures. CSV cells starting with `=`, `+`, `-` or `@` get a leading quote so Excel doesn't run them.
 
 Findings stay plain text. No clickable URLs. `Export...` and `Send to editor` write straight to disk and never touch the clipboard. This is intentional... some download managers love watching the clipboard and immediately grabbing every URL they see. `Copy selected` is the only thing that puts anything there.
 
@@ -77,7 +70,7 @@ https://example.com/baz
 
 ## Some FXChainPlayer DNA inside
 
-The process reader comes from the ripper backend I originally wrote for FXChainPlayer (`src/audio/rip_backend_win32.cpp` through `IMemoryReader`). That part does the memory region walking, integrity handling, image classification and UAC relaunch.
+The process reader comes from the ripper backend I originally wrote for FXChainPlayer (`src/audio/rip_backend_win32.cpp` through `IMemoryReader`). That part does the memory region walking, integrity handling and image classification.
 
 It gets compiled from an FXChainPlayer checkout, it's not copied into this repo.
 
@@ -103,23 +96,23 @@ bin\StringRipper.exe
 
 Static CRT + LTO. There's also a prebuilt exe in `bin\`.
 
-CMake works too:
+No MSVC? `build-mingw.sh` cross-builds from Linux. CMake works too:
 
 ```text
 cmake -DFXCHAINPLAYER_DIR=<checkout>
 ```
 
+Tests: `cmake -S . -B build && cmake --build build && ctest --test-dir build`.
+
 ## Usage
 
-Run it without arguments if you want the GUI. Pick/filter a process or file, choose URL or Regex mode, select the encodings and hit Scan.
+Run it without arguments for the GUI. Pick or filter a process or file, choose URL or Regex mode, tick the encodings and hit Scan.
 
-You can also drop files or folders straight onto the window, or straight onto the exe itself (Explorer launches it and it scans them). Several at once is fine, folders get walked recursively. Dropping on the window only sets the source and you still hit Scan; dropping on the exe scans right away. Only one instance runs at a time, a second launch hands its files to the first and bows out, so scans never race.
+Drop files or folders on the window or straight on the exe. Several at once is fine, folders get walked. On the window it only sets the source and you hit Scan, on the exe it scans right away. Only one instance runs, a second launch hands its files to the first and bows out, so scans never race.
 
-The process list refreshes itself as programs come and go, and if the process you scanned exits the results clear themselves. Scan progress shows a percent. There's a Clear button, and a Crap filter (on by default in URL mode) that drops placeholder and XML-namespace hosts. Regex mode has a Download preset for partial file URLs ending in .exe/.zip/.dmg/.pkg and the like.
+The process list follows programs as they come and go, and if the process you scanned exits the results clear themselves. Progress shows a percent with two decimals, against a plan made up front: file sizes, or the readable memory regions of a process (first 2 GiB). Pause and Cancel take effect between work chunks. Crap filter (on by default in URL mode) drops placeholder and XML-namespace hosts. The Download preset catches partial URLs ending in .exe/.zip/.dmg/.pkg and the like.
 
-Progress uses two decimal places and counts completed plus explicitly skipped bytes against the planned range; overlap bytes are not counted twice. File sizes and readable process-memory regions are planned in the background first; process scans are limited to the first 2 GiB of eligible memory. A file scan uses the planned size even if the file grows. Cancellation and pause work for files, folders and processes between work chunks.
-
-Audit findings, validation and benchmark instructions are in [docs/AUDIT-1.2.md](docs/AUDIT-1.2.md).
+Audit notes, tests and benchmark instructions are in [docs/AUDIT-1.2.md](docs/AUDIT-1.2.md).
 
 CLI works too:
 
@@ -132,7 +125,7 @@ StringRipper.exe --folder .\dump --scheme https --no-crap  # keep every host
 StringRipper.exe --help
 ```
 
-Saved presets and structured export (use `stringripper` on macOS/Linux):
+Saved presets and structured output (`stringripper` on macOS/Linux):
 
 ```text
 StringRipper.exe --list-user-presets
@@ -140,9 +133,9 @@ StringRipper.exe --file log.txt --user-preset "Support ticket IDs" --format json
 StringRipper.exe --file log.txt --presets-file C:\Tools\regex-user-presets.ini --user-preset "Semantic versions" --format csv --out versions.csv
 ```
 
-The portable CLI also supports `--include`, `--exclude`, size/date and byte-range filters, `--db`, `--save-session`, `--open-session`, `--compare-sessions`, `--save-job`, `--run-job`, `--list-jobs`, `--favorite`, `--favorites` and `--format sqlite`. Repeat `--user-preset` to combine patterns. Numeric dates are Unix seconds in the CLI; ranges accept decimal or `0x` hex and have an exclusive end.
+Also: `--include`, `--exclude`, size/date/range filters, `--db`, `--save-session`, `--open-session`, `--compare-sessions`, `--save-job`, `--run-job`, `--list-jobs`, `--favorite`, `--favorites` and `--format sqlite`. Repeat `--user-preset` to stack patterns. Dates are Unix seconds, ranges take decimal or `0x` hex with an exclusive end. Explicit regex/decoder switches beat the preset, whatever the order.
 
-Without `--presets-file`, the CLI reads `regex-user-presets.ini` next to the actual executable, independent of the working directory. Missing/invalid files and unknown names fail with exit code 2; a valid scan with no matches returns 1, otherwise 0. The GUI still automatically loads the first preset when its INI exists.
+Without `--presets-file` it reads `regex-user-presets.ini` next to the executable, not from the working directory. Exit code 0 hits, 1 no hits, 2 error (bad file, unknown preset name...).
 
 Reading a higher-integrity process needs an elevated StringRipper. Windows being Windows :) Drag and drop keeps working when it runs elevated, the drop messages are let through on purpose.
 
@@ -169,6 +162,6 @@ The exe asks for nothing at startup, it runs as whoever started it (the manifest
 
 ## macOS / Linux
 
-The detection core is portable. `build-macos.sh` builds a universal CLI (arm64 min 11.0, x86_64 min 10.15) that scans files and folders; process memory stays Windows-only. Full details, including building both slices on an Apple Silicon Mac and the GitHub Actions route, are in [`docs/MACOS.md`](docs/MACOS.md).
+CLI only: files and folders, no process reader. Same flags as the Windows CLI, minus `--pid`. `build-macos.sh` makes arm64 (11.0+), x86_64 (10.15+) and a universal binary, and a GitHub Actions workflow does the same on a `v*` tag. Details, incl. building both slices on an Apple Silicon Mac, are in [`docs/MACOS.md`](docs/MACOS.md).
 
 Akustikrausch.
