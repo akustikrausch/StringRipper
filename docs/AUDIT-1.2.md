@@ -46,4 +46,34 @@ Core, preset and driver regression tests cover decoder selection, exact byte cap
 
 The expanded suites additionally cover absolute offsets, named captures, file selection, relative exclusions, job serialization, SQLite sessions/favorites, session comparison and CLI round trips. Six Release tests and six sanitizer tests passed on Linux. The updated Win32 GUI and SQLite adapter translation units compiled with MinGW; a native Windows GUI smoke test and MSVC release build are still pending.
 
-A native Windows GUI smoke test and MSVC release build remain pending: the host has no detected MSVC toolchain and its MinGW headers lack the audio-meter interface required by the external FXChainPlayer backend. The existing release EXE has not been replaced.
+## Follow-up audit (lookbehind, scan abort, CSV injection, job-name overflow)
+
+- `namedGroups()` treated any `(?<` as a named-group start, so a lookbehind assertion `(?<=...)` / `(?<!...)` was rejected with "named group has no closing >" instead of failing on its own terms. std::regex still cannot compile lookbehind; the diagnosis is now correct instead of misleading.
+- The polynomial regex executor can still throw `regex_error(error_complexity)` against a specific automaton/input pairing inside one window — observed live scanning a real running process. It previously escaped `matchRegex` uncaught and aborted the entire scan through `ScanPool`'s exception propagation. A window that throws is now skipped like a non-matching one instead of failing the whole scan.
+- `csvField()` did not neutralize values starting with `=`, `+`, `-`, `@` or a tab, so a CSV export of scanned (attacker-controlled, by construction) content could execute as a formula when opened in Excel/Sheets — CWE-1236. Such fields are now quote-prefixed.
+- The Workspace "Run selected" job handler read the selected job name with `LB_GETTEXT` into a fixed `wchar_t[256]`. `LB_GETTEXT` has no length limit of its own, and job names are free-typed text with no cap anywhere on the write path, so a longer name overflowed the stack. The buffer is now sized from `LB_GETTEXTLEN` first; the name field is also capped at 200 characters as defense in depth. Confirmed exploitable pre-fix and fixed against the compiled binary with 500- and 4000-character job names.
+
+All four are regression-tested (`tests/test_scan.cpp`, `tests/test_features.cpp`, `tests/test_workspace.cpp`).
+
+## Verification (MSVC build and native GUI)
+
+A fresh MSVC release build now exists (`build.ps1`: `cl /O2 /GL /MT`, `/link /LTCG /MANIFEST:EMBED`), FileVersion/ProductVersion 1.2.0, statically linked CRT (no msvcrt/vcruntime import), confirmed against the compiled exe. Six Release ctest tests, the MinGW cross-build (stack-overflow and lookbehind regressions), and a manual ASan+UBSan+TSan pass over all five test binaries all pass clean against the current source.
+
+Interactive native GUI test, on Windows:
+
+| Area | Status |
+| --- | --- |
+| Start, everything-on file scan (all decoders, custom regex, all presets) | Passed |
+| Pause / resume / cancel | Passed |
+| Process scan with live progress | Passed |
+| Preset editor: validate, reject, fix, save; backup/recovery verified on disk | Passed |
+| Workspace: save/list/run job, incl. the job-name overflow fix | Passed |
+| Dashboard open/close | Passed |
+| Scan Settings: reject invalid range (warning shown), accept once fixed | Passed |
+| Live/monitor toggle, interval, one confirmed auto-rescan | Passed |
+| Native Export dialog (txt/csv/json/sqlite) | Not executed — system common dialog, not automatable the same way; `exportResults()`/`SessionStore` beneath it are unit-tested |
+| LogiTune reproduction specifically | Not executed — LogiTune unavailable in this environment; the crash path is instead covered by the adversarial-regex harness and a live scan of a real running process |
+| Code signing / notarization | Blocked — requires separate authorization |
+| Push / GitHub release | Blocked — requires separate authorization |
+
+The existing release EXE has been replaced.
