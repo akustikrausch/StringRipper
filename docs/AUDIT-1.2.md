@@ -44,36 +44,35 @@ cmake --build build --target benchmark_scan
 
 Core, preset and driver regression tests cover decoder selection, exact byte caps, overlap accounting, cancellation, unreadable memory, file-size snapshots, preset round trips and backup preservation. AddressSanitizer and UndefinedBehaviorSanitizer were also used. The Win32 translation unit was checked with MinGW.
 
-The expanded suites additionally cover absolute offsets, named captures, file selection, relative exclusions, job serialization, SQLite sessions/favorites, session comparison and CLI round trips. Six Release tests and six sanitizer tests passed on Linux. The updated Win32 GUI and SQLite adapter translation units compiled with MinGW; a native Windows GUI smoke test and MSVC release build are still pending.
+The expanded suites additionally cover absolute offsets, named captures, file selection, relative exclusions, job serialization, SQLite sessions/favorites, session comparison and CLI round trips. Six Release tests and six sanitizer tests passed on Linux. The Win32 GUI and SQLite adapter translation units compile with MinGW; the MSVC build and the native GUI run are below.
 
-## Follow-up audit (lookbehind, scan abort, CSV injection, job-name overflow)
+## Follow-up audit
 
-- `namedGroups()` treated any `(?<` as a named-group start, so a lookbehind assertion `(?<=...)` / `(?<!...)` was rejected with "named group has no closing >" instead of failing on its own terms. std::regex still cannot compile lookbehind; the diagnosis is now correct instead of misleading.
-- The polynomial regex executor can still throw `regex_error(error_complexity)` against a specific automaton/input pairing inside one window — observed live scanning a real running process. It previously escaped `matchRegex` uncaught and aborted the entire scan through `ScanPool`'s exception propagation. A window that throws is now skipped like a non-matching one instead of failing the whole scan.
-- `csvField()` did not neutralize values starting with `=`, `+`, `-`, `@` or a tab, so a CSV export of scanned (attacker-controlled, by construction) content could execute as a formula when opened in Excel/Sheets — CWE-1236. Such fields are now quote-prefixed.
-- The Workspace "Run selected" job handler read the selected job name with `LB_GETTEXT` into a fixed `wchar_t[256]`. `LB_GETTEXT` has no length limit of its own, and job names are free-typed text with no cap anywhere on the write path, so a longer name overflowed the stack. The buffer is now sized from `LB_GETTEXTLEN` first; the name field is also capped at 200 characters as defense in depth. Confirmed exploitable pre-fix and fixed against the compiled binary with 500- and 4000-character job names.
+- `namedGroups()` took any `(?<` for a named group, so lookbehind `(?<=...)` / `(?<!...)` failed with "named group has no closing >". std::regex has no lookbehind; it now fails on its own terms.
+- Both regex engines can give up on a window: libstdc++ and the MSVC STL throw `regex_error` (complexity, and on MSVC a 600/1000-frame stack limit) instead of overflowing the stack. The exception escaped `matchRegex` and killed the whole scan. A window that throws is now skipped. Control run on MSVC 14.44: the pre-fix code aborts the adversarial harness (0xC0000409), the fixed code finishes it in about 14 ms.
+- `csvField()` did not neutralize cells starting with `=`, `+`, `-`, `@` or tab, so an export of scanned (attacker-controlled) content could run as a formula in Excel/Sheets (CWE-1236). Those cells get a leading quote now.
+- Workspace "Run selected" read the job name with `LB_GETTEXT` into a fixed `wchar_t[256]`. `LB_GETTEXT` has no bound and job names are free text, so a long name overflowed the stack (reproduced with 500 and 4000 characters). The buffer is sized from `LB_GETTEXTLEN` now and the name field is capped at 200 characters.
+- The windowed-regex tests were compiled for libstdc++ only. They run on every engine now; only the backreference check stays guarded (libstdc++'s polynomial mode rejects backreferences, MSVC accepts them).
 
-All four are regression-tested (`tests/test_scan.cpp`, `tests/test_features.cpp`, `tests/test_workspace.cpp`).
+Regression tests for all of it are in `tests/test_scan.cpp`, `tests/test_features.cpp` and `tests/test_workspace.cpp`.
 
-## Verification (MSVC build and native GUI)
+## Verification (MSVC build, native GUI)
 
-A fresh MSVC release build now exists (`build.ps1`: `cl /O2 /GL /MT`, `/link /LTCG /MANIFEST:EMBED`), FileVersion/ProductVersion 1.2.0, statically linked CRT (no msvcrt/vcruntime import), confirmed against the compiled exe. Six Release ctest tests, the MinGW cross-build (stack-overflow and lookbehind regressions), and a manual ASan+UBSan+TSan pass over all five test binaries all pass clean against the current source.
+Release exe built with `build.ps1` (`cl /O2 /GL /MT`, `/LTCG`, embedded manifest): 1.2.0, static CRT, no msvcrt/vcruntime import. Linux: six ctest tests, ASan+UBSan over all five test binaries, TSan over the driver test. The five test binaries also pass built with MSVC 14.44 (`/O2 /MT`), and the MinGW cross-build compiles.
 
-Interactive native GUI test, on Windows:
+GUI, run by hand on Windows:
 
 | Area | Status |
 | --- | --- |
 | Start, everything-on file scan (all decoders, custom regex, all presets) | Passed |
 | Pause / resume / cancel | Passed |
 | Process scan with live progress | Passed |
-| Preset editor: validate, reject, fix, save; backup/recovery verified on disk | Passed |
-| Workspace: save/list/run job, incl. the job-name overflow fix | Passed |
+| Preset editor: validate, reject, fix, save; backup and recovery checked on disk | Passed |
+| Workspace: save/list/run job, incl. the long job name fix | Passed |
 | Dashboard open/close | Passed |
-| Scan Settings: reject invalid range (warning shown), accept once fixed | Passed |
-| Live/monitor toggle, interval, one confirmed auto-rescan | Passed |
-| Native Export dialog (txt/csv/json/sqlite) | Not executed — system common dialog, not automatable the same way; `exportResults()`/`SessionStore` beneath it are unit-tested |
-| LogiTune reproduction specifically | Not executed — LogiTune unavailable in this environment; the crash path is instead covered by the adversarial-regex harness and a live scan of a real running process |
-| Code signing / notarization | Blocked — requires separate authorization |
-| Push / GitHub release | Blocked — requires separate authorization |
-
-The existing release EXE has been replaced.
+| Scan settings: invalid range warns, valid range applies | Passed |
+| Live: toggle, interval, one automatic rescan | Passed |
+| Adversarial regex harness built with MSVC | Passed |
+| Native Export dialog (txt/csv/json/sqlite) | Not run by hand; `exportResults()` and `SessionStore` under it are unit-tested |
+| Original crash reproduction | Not run; the crashing process was not available. Covered by the adversarial harness (libstdc++ and MSVC) and a live scan of a real process |
+| Code signing | Not done, no certificate |
