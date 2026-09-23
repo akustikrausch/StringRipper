@@ -7,7 +7,6 @@
 
 namespace ur {
 
-// Infrastructure adapter. The scanner and domain model never depend on SQLite.
 class SessionStore {
 public:
     explicit SessionStore(const std::filesystem::path& file);

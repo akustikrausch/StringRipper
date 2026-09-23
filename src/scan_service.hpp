@@ -9,7 +9,6 @@
 
 namespace ur {
 
-// Application use case shared by Win32 UI/CLI and the portable CLI.
 inline std::vector<Group> scanPaths(const Detector& detector,
                                     const std::vector<std::filesystem::path>& inputs,
                                     bool* denied = nullptr,

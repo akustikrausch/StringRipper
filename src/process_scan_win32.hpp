@@ -7,7 +7,6 @@
 
 namespace ur {
 
-// Windows infrastructure adapter. Core detection never sees process APIs.
 inline std::vector<Group> scanProcess(const Detector& detector, uint32_t pid,
                                       const std::function<bool()>& cancel,
                                       bool& accessDenied, bool& needsElevation,

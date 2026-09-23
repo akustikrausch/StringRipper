@@ -19,12 +19,6 @@ inline std::string jsonString(const std::string& s) {
     return out + '"';
 }
 
-// CSV/formula injection (CWE-1236): a scanned value is attacker-controlled by
-// design (it came out of someone else's process or file), and a field opened
-// in Excel/Sheets that starts with =, +, -, @ or a tab is evaluated as a
-// formula, not shown as text. Prefix those with a quote, the standard
-// neutralization spreadsheets treat as "this cell is text" and hide on
-// display; the raw field (with the added quote) is still fully recoverable.
 inline std::string csvField(const std::string& s) {
     std::string out = "\"";
     if (!s.empty() && (s[0] == '=' || s[0] == '+' || s[0] == '-' || s[0] == '@' || s[0] == '\t'))

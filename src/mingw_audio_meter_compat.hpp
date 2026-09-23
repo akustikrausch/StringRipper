@@ -1,7 +1,5 @@
 #pragma once
 
-// Some MinGW-w64 releases forward-declare this WASAPI interface without its
-// definition. The FXChainPlayer backend uses GetPeakValue and __uuidof.
 #ifdef __MINGW32__
 #include <endpointvolume.h>
 

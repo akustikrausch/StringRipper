@@ -1321,7 +1321,6 @@ void doScan() {
     });
 }
 
-// Workspace window is a GUI adapter over SessionStore; no persistence logic lives here.
 enum : int { WS_SESSIONS = 6000, WS_NAME, WS_SAVE_SESSION, WS_OPEN_SESSION, WS_COMPARE,
              WS_JOBS, WS_SAVE_JOB, WS_RUN_JOB, WS_ADDED, WS_REMOVED, WS_STATUS, WS_CLOSE,
              WS_FAVORITES, WS_ADD_FAVORITE, WS_USE_FAVORITE, WS_REMOVE_FAVORITE };
@@ -1478,11 +1477,6 @@ LRESULT CALLBACK WorkspaceProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (id == WS_RUN_JOB) {
                 int selected = (int)SendMessageW(g_wsJobs, LB_GETCURSEL, 0, 0);
                 if (selected < 0) throw std::runtime_error("Select a job");
-                // LB_GETTEXT has no length limit of its own -- unlike controlText()'s
-                // GetWindowText pattern, it writes the whole string into the caller's
-                // buffer with no bound. A job name (free text, saved to SQLite, no
-                // length cap on that path either) longer than a fixed stack buffer
-                // here overflowed it. Size the buffer from LB_GETTEXTLEN first.
                 int len = (int)SendMessageW(g_wsJobs, LB_GETTEXTLEN, selected, 0);
                 if (len == LB_ERR) throw std::runtime_error("Could not read the job name");
                 std::wstring name(static_cast<std::size_t>(len) + 1, L'\0');

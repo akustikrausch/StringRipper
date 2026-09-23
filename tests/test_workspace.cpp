@@ -58,10 +58,7 @@ int main() {
         require(delta.removed[0].items[0].value == "KEY-42", "removed diff");
         require(delta.unchanged.empty(), "unchanged diff");
 
-        // Regression: loadSession() reconstructs groups by checking whether the
-        // previous row's group name differs (relies on findings being written
-        // contiguously per group, which saveSession's nested loop guarantees).
-        // Only ever exercised with one group before; lock in the multi-group case.
+        // several groups in one session
         ur::Finding ga1{"a1", ur::Enc::Ascii, "s", "GroupA"};
         ur::Finding ga2{"a2", ur::Enc::Ascii, "s", "GroupA"};
         ur::Finding gb1{"b1", ur::Enc::Ascii, "s", "GroupB"};
