@@ -184,9 +184,7 @@ int main() {
         CHECK(threw, "invalid custom regex rejected");
     }
 
-#ifdef __GLIBCXX__
-    // Regression: the former libstdc++ DFS matcher overflowed the worker
-    // stack on long printable runs while all built-in patterns were enabled.
+    // windowed regex: long run, window border, anchors, oversize hit
     {
         ur::Options o; o.mode = ur::Mode::Regex;
         o.presets = {"email", "ipv4", "ipv6", "guid", "apikey", "filepath", "fileurl"};
@@ -220,6 +218,7 @@ int main() {
         det.scan(reinterpret_cast<const uint8_t*>(data.data()), data.size(), "long-value", sink);
         CHECK(sink.items.empty(), "oversize match does not emit a truncated suffix");
     }
+#ifdef __GLIBCXX__
     {
         bool rejected = false;
         try { ur::Options o; o.mode = ur::Mode::Regex; o.customRegex = R"((a)\1)"; ur::Detector det(o); }
@@ -245,25 +244,17 @@ int main() {
         }
     }
 
-    // Regression (audit finding): namedGroups() used to treat a lookbehind
-    // assertion, (?<=...) / (?<!...), as a malformed named group and reject
-    // it with "named group has no closing >" -- a confusing diagnosis of the
-    // wrong problem. std::regex's ECMAScript grammar does not support
-    // lookbehind at all (a library limitation, not something this preprocessor
-    // can fix), so the pattern still must not compile -- but it must fail in
-    // the actual regex compiler on its own terms, and a real named group
-    // elsewhere in the same pattern must still parse correctly either way.
+    // Regression: lookbehind was reported as a malformed named group
     {
         auto rejectsAsLookbehind = [](const std::string& pattern) {
             try { ur::Options o; o.mode = ur::Mode::Regex; o.customRegex = pattern; ur::Detector d(o); return false; }
             catch (const ur::RegexError& e) {
                 std::string w = e.what();
-                return w.find("named group") == std::string::npos; // not misattributed
+                return w.find("named group") == std::string::npos;
             }
         };
         CHECK(rejectsAsLookbehind("(?<=foo)bar"), "lookbehind rejected on its own terms, not as a bad named group");
         CHECK(rejectsAsLookbehind("(?<!foo)bar"), "negative lookbehind rejected on its own terms, not as a bad named group");
-        // a real named group must still parse when the pattern is otherwise fine
         ur::Options o; o.mode = ur::Mode::Regex; o.customRegex = "(?<id>[0-9]+)";
         bool ok = true;
         try { ur::Detector d(o); } catch (const ur::RegexError&) { ok = false; }
