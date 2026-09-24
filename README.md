@@ -14,7 +14,7 @@ Regex mode has presets for the usual stuff: email, IPv4/IPv6, GUIDs, API keys, f
 
 ## User presets
 
-Put `regex-user-presets.ini` next to the exe and the first preset loads at startup. **User presets...** creates, edits, validates and saves them, decoder and built-in switches included. Unsaved edits stay until you save or discard.
+Put `regex-user-presets.ini` next to the exe and the first preset loads at startup. **User presets...** creates, edits, validates and saves them, decoder and built-in switches included. Unsaved edits stay until you save or discard. The editor resizes and maximizes; while it's open the main window waits in the taskbar and comes back when you close it.
 
 Presets can carry example lines. **Test sample** runs the patterns against pasted text (2048 chars, not saved), **Run saved cases** checks every saved line, **Add to profile** stacks presets into one scan.
 
