@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -44,6 +45,7 @@
 #include "scan_service.hpp"
 #include "process_scan_win32.hpp"
 #include "session_store.hpp"
+#include "update.hpp"
 #include "audio/rip_backend.h"
 #include "version.h"
 
@@ -256,6 +258,10 @@ enum : int {
     ID_WORKSPACE, ID_MONITOR, ID_MONITOR_INTERVAL, ID_SCAN_SETTINGS, ID_DASHBOARD
 };
 constexpr UINT WM_APP_DONE = WM_APP + 1;
+constexpr UINT WM_APP_UPDATE_FOUND = WM_APP + 2;   // background check found a newer version
+constexpr UINT WM_APP_UPDATE_PROGRESS = WM_APP + 3; // wParam = percent, download running
+constexpr UINT WM_APP_UPDATE_DONE = WM_APP + 4;     // wParam: 1 = ready to relaunch, 0 = failed (lParam = wchar_t* msg)
+constexpr UINT WM_APP_UPDATE_UPTODATE = WM_APP + 5; // manual check: nothing newer
 constexpr UINT_PTR TIMER_PROGRESS = 1;
 constexpr UINT_PTR TIMER_PROCS = 2;
 constexpr UINT_PTR TIMER_MONITOR = 3;
@@ -327,6 +333,16 @@ ur::ScanProgress g_progress;
 ur::FileSelection g_fileSelection;
 std::string g_scanError;
 std::thread g_scanThread;
+
+/* auto-update state, all touched only on the UI thread except the worker
+   below, which only PostMessages back. See update.hpp. */
+std::filesystem::path appDataDir();
+ur::UpdatePrefs g_updatePrefs;
+ur::UpdateInfo g_update;
+std::thread g_updateThread;
+std::atomic<bool> g_updateBusy{false};
+bool g_updateManual = false;                       // true while a user-triggered check runs
+std::filesystem::path updatePrefsPath() { return appDataDir() / L"update.ini"; }
 std::vector<ur::UserPreset> g_userPresets;
 std::filesystem::path g_presetPath;
 std::string g_activePreset;
@@ -335,6 +351,7 @@ std::vector<std::string> g_profileNames;
 bool g_applyingPreset = false;
 
 void applyFonts();
+void startUpdateCheck(bool manual);
 void fitColumns();
 void layout(int cw, int ch);
 void relayout(HWND hwnd);
@@ -378,6 +395,11 @@ void inkText(HDC dc, const wchar_t* t, RECT r, HFONT f, COLORREF c, UINT fmt, in
     DrawTextW(dc, t, -1, &r, fmt);
     SetTextCharacterExtra(dc, oe);
     SelectObject(dc, of);
+}
+
+void darkTitle(HWND h) {
+    BOOL dark = TRUE;
+    DwmSetWindowAttribute(h, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
 }
 
 bool isMode(HWND h) { return h == g_modeUrl || h == g_modeRegex; }
@@ -706,6 +728,7 @@ void peLayout(HWND h, int cw, int ch) {
 LRESULT CALLBACK PresetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
+        darkTitle(h);
         g_peIndex = -1;
         g_peSaved = ur::serializeUserPresets(g_userPresets);
         peCtl(h, L"STATIC", L"Presets", PE_T_PRESETS, 0);
@@ -910,8 +933,11 @@ void showAbout() {
     s += "Scan on up to 16 workers. URL match hand-rolled, regex via std::regex.\r\n";
     s += "ASCII/ANSI/UTF-8, UTF-16, Base64, Hex.\r\n";
     s += "Reader from Akustikrausch's FXChainPlayer.\r\n";
-    s += "Portable workspace storage uses SQLite.\r\n";
-    MessageBoxW(g_main, widen(s).c_str(), L"About StringRipper", MB_OK | MB_ICONINFORMATION);
+    s += "Portable workspace storage uses SQLite.\r\n\r\n";
+    s += "Check for updates now?";
+    if (MessageBoxW(g_main, widen(s).c_str(), L"About StringRipper",
+                    MB_YESNO | MB_ICONINFORMATION) == IDYES)
+        startUpdateCheck(true);
 }
 
 void fillCombo() {
@@ -1402,7 +1428,7 @@ HWND g_ws = nullptr, g_wsSessions, g_wsName, g_wsJobs, g_wsFavorites, g_wsAdded,
 std::vector<ur::Session> g_wsIndex;
 std::vector<std::pair<std::string, std::string>> g_wsFavoriteIndex;
 
-std::filesystem::path workspaceDatabase() {
+std::filesystem::path appDataDir() {
     wchar_t base[32768]{};
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, 32768);
     std::filesystem::path dir;
@@ -1412,8 +1438,9 @@ std::filesystem::path workspaceDatabase() {
         dir = std::filesystem::path(exe).parent_path();
     }
     std::filesystem::create_directories(dir);
-    return dir / L"workspace.sqlite";
+    return dir;
 }
+std::filesystem::path workspaceDatabase() { return appDataDir() / L"workspace.sqlite"; }
 void wsError(HWND h, const std::exception& e) {
     SetWindowTextW(g_wsStatus, widen(e.what()).c_str());
     MessageBoxW(h, widen(e.what()).c_str(), L"Workspace", MB_ICONERROR);
@@ -1465,6 +1492,7 @@ void wsApplyOptions(const ur::Options& o) {
 LRESULT CALLBACK WorkspaceProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE:
+        darkTitle(h);
         peCtl(h, L"STATIC", L"Saved sessions (select two to compare)", 0, 0, 14, 12, 620, 22);
         g_wsSessions = peCtl(h, L"LISTBOX", L"", WS_SESSIONS,
             LBS_EXTENDEDSEL | WS_BORDER | WS_VSCROLL | WS_HSCROLL, 14, 38, 626, 132);
@@ -1633,6 +1661,7 @@ HWND g_dashboardWindow = nullptr;
 LRESULT CALLBACK DashboardProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
+        darkTitle(h);
         peCtl(h, L"STATIC", L"Findings by pattern, source and encoding", 0, 0, 16, 14, 560, 24);
         auto summary = widen(ur::dashboardText(ur::summarizeResults(g_viewResults)));
         peCtl(h, L"EDIT", summary.c_str(), 0,
@@ -1706,6 +1735,7 @@ uint64_t parseSize(HWND field) {
 LRESULT CALLBACK ScanSettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
+        darkTitle(h);
         peCtl(h, L"STATIC", L"File selection and scan range", 0, 0, 20, 14, 540, 25);
         auto row = [&](const wchar_t* label, int id, int y, HWND& field, const std::wstring& value) {
             peCtl(h, L"STATIC", label, 0, 0, 20, y + 4, 160, 22);
@@ -1814,6 +1844,7 @@ std::wstring g_inspectorText;
 LRESULT CALLBACK InspectorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
+        darkTitle(h);
         peCtl(h, L"STATIC", L"Read-only bytes around the selected finding", 0, 0, 14, 12, 700, 24);
         HWND view = peCtl(h, L"EDIT", g_inspectorText.c_str(), 0,
             ES_MULTILINE | ES_READONLY | WS_BORDER | WS_VSCROLL | WS_HSCROLL,
@@ -2112,6 +2143,100 @@ void relayout(HWND hwnd) {
     RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
 }
 
+/*--- auto-update ---*/
+static const wchar_t* kUpdateManifestUrl =
+    L"https://github.com/akustikrausch/StringRipper/releases/latest/download/latest.json";
+static const wchar_t* kReleasesPageUrl =
+    L"https://github.com/akustikrausch/StringRipper/releases/latest";
+std::filesystem::path g_updateDownloadPath;
+
+static std::wstring updateUserAgent() { return L"StringRipper/" + widen(STRINGRIPPER_VERSION); }
+static void postUpdateError(const std::wstring& m) {
+    PostMessageW(g_main, WM_APP_UPDATE_DONE, 0, (LPARAM)_wcsdup(m.c_str()));
+}
+static void updateProgress(long long got, long long total, void*) {
+    int pct = total > 0 ? (int)(got * 100 / total) : 0;
+    PostMessageW(g_main, WM_APP_UPDATE_PROGRESS, (WPARAM)pct, 0);
+}
+
+// Worker: fetch latest.json, decide. Only PostMessages back to the UI thread.
+void runUpdateCheck(bool manual) {
+    std::string json, err;
+    if (!ur::httpGet(kUpdateManifestUrl, json, &err, 1 << 20, updateUserAgent())) {
+        if (manual) postUpdateError(widen(err.empty() ? "update check failed" : err));
+        return;
+    }
+    ur::UpdateInfo info;
+    if (!ur::parseManifest(json, info)) { if (manual) postUpdateError(L"malformed update manifest"); return; }
+
+    const std::string cur = STRINGRIPPER_VERSION;
+    if (!ur::isNewerVersion(info.version, cur)) {
+        if (manual) PostMessageW(g_main, WM_APP_UPDATE_UPTODATE, 0, 0);
+        return;
+    }
+    // minVersion gate: too old to jump straight to the new build.
+    if (!info.minVersion.empty() && info.minVersion != cur && ur::isNewerVersion(info.minVersion, cur)) {
+        if (manual) postUpdateError(L"a newer version exists but needs a manual reinstall");
+        return;
+    }
+    // No usable installer entry -> manual download only (open the release page).
+    bool hashOk = info.sha256.size() == 64;
+    for (char c : info.sha256) if (!isxdigit((unsigned char)c)) hashOk = false;
+    if (info.url.empty() || !hashOk) {
+        // Newer version exists but the manifest carries no verifiable installer.
+        // Only nag on a manual check; a silent auto-check stays silent.
+        if (manual) { info.url.clear(); g_update = info;
+            PostMessageW(g_main, WM_APP_UPDATE_FOUND, 1, (LPARAM)2 /*manual-only*/); }
+        return;
+    }
+    if (!manual && info.version == g_updatePrefs.skipped) return;   // user skipped this one
+
+    g_update = info;
+    // Persist the snapshot (mirrors FXChainPlayer's cached-update replay).
+    g_updatePrefs.cachedVersion = info.version; g_updatePrefs.cachedUrl = info.url;
+    g_updatePrefs.cachedSha256 = info.sha256; g_updatePrefs.cachedSize = info.size;
+    g_updatePrefs.cachedChangelog = info.changelog;
+    g_updatePrefs.save(updatePrefsPath());
+    PostMessageW(g_main, WM_APP_UPDATE_FOUND, (WPARAM)(manual ? 1 : 0), 0);
+}
+
+// Worker: download the verified asset to a temp file next to the workspace DB
+// (never beside the exe, so a stray write can't clobber the presets ini).
+void runUpdateDownload() {
+    std::string bytes, err;
+    if (!ur::httpGet(widen(g_update.url), bytes, &err, 500LL << 20, updateUserAgent(),
+                     updateProgress)) {
+        postUpdateError(widen(err.empty() ? "download failed" : err));
+        return;
+    }
+    std::string want = g_update.sha256;
+    for (char& c : want) c = (char)tolower((unsigned char)c);
+    if (ur::sha256Hex(bytes.data(), bytes.size()) != want) {
+        postUpdateError(L"the downloaded file is corrupt (checksum mismatch)");
+        return;
+    }
+    std::filesystem::path tmp = appDataDir() / (L"StringRipper-" + widen(g_update.version) + L".exe.download");
+    { std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+      out.write(bytes.data(), (std::streamsize)bytes.size());
+      if (!out) { postUpdateError(L"could not save the downloaded update"); return; } }
+    g_updateDownloadPath = tmp;
+    PostMessageW(g_main, WM_APP_UPDATE_DONE, 1, 0);
+}
+
+void startUpdateCheck(bool manual) {
+    bool expected = false;
+    if (!g_updateBusy.compare_exchange_strong(expected, true)) return;
+    g_updateManual = manual;
+    if (g_updateThread.joinable()) g_updateThread.join();
+    g_updateThread = std::thread([manual]{ runUpdateCheck(manual); g_updateBusy = false; });
+}
+void startUpdateDownload() {
+    bool expected = false;
+    if (!g_updateBusy.compare_exchange_strong(expected, true)) return;
+    if (g_updateThread.joinable()) g_updateThread.join();
+    g_updateThread = std::thread([]{ runUpdateDownload(); g_updateBusy = false; });
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
@@ -2213,8 +2338,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         for (HWND h : {g_search, g_custom, g_filter}) SetWindowTheme(h, L"", L"");
 
-        BOOL dark = TRUE;
-        DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+        darkTitle(hwnd);
 
         /* drop */
         for (HWND h : {hwnd, g_results}) {
@@ -2478,10 +2602,68 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_DONE:
         onDone((std::vector<ur::Group>*)lp);
         return 0;
+    case WM_APP_UPDATE_FOUND: {
+        const bool manualOnly = lp == 2;
+        std::wstring msg = L"StringRipper " + widen(g_update.version) +
+            L" is available (you have " STRINGRIPPER_VERSION L").\r\n\r\n";
+        if (!g_update.changelog.empty()) msg += widen(g_update.changelog) + L"\r\n\r\n";
+        if (manualOnly) {
+            msg += L"Open the download page?";
+            if (MessageBoxW(hwnd, msg.c_str(), L"Update available", MB_YESNO | MB_ICONINFORMATION) == IDYES)
+                ShellExecuteW(hwnd, L"open", g_update.notes.empty() ? kReleasesPageUrl
+                              : widen(g_update.notes).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        }
+        msg += L"Yes: update now.   No: later.   Cancel: skip this version.";
+        int r = MessageBoxW(hwnd, msg.c_str(), L"Update available", MB_YESNOCANCEL | MB_ICONINFORMATION);
+        if (r == IDYES) {
+            SetWindowTextW(g_status, L"Downloading update...");
+            startUpdateDownload();
+        } else if (r == IDCANCEL) {
+            g_updatePrefs.skipped = g_update.version;
+            g_updatePrefs.save(updatePrefsPath());
+        }
+        return 0;
+    }
+    case WM_APP_UPDATE_PROGRESS: {
+        wchar_t s[64]; _snwprintf_s(s, _TRUNCATE, L"Downloading update... %d%%", (int)wp);
+        SetWindowTextW(g_status, s);
+        return 0;
+    }
+    case WM_APP_UPDATE_UPTODATE:
+        MessageBoxW(hwnd, L"You are on the latest version.", L"StringRipper", MB_OK | MB_ICONINFORMATION);
+        return 0;
+    case WM_APP_UPDATE_DONE: {
+        if (wp == 1) {
+            if (g_updateThread.joinable()) g_updateThread.join();
+            std::string err;
+            if (ur::selfReplaceAndRelaunch(g_updateDownloadPath, &err)) {
+                DestroyWindow(hwnd);   // new instance is already launching
+            } else {
+                std::error_code ec; std::filesystem::remove(g_updateDownloadPath, ec);
+                std::wstring m = L"Could not install the update: " + widen(err) +
+                    L"\r\n\r\nOpen the download page instead?";
+                SetWindowTextW(g_status, L"Update could not be installed");
+                if (MessageBoxW(hwnd, m.c_str(), L"Update", MB_YESNO | MB_ICONWARNING) == IDYES)
+                    ShellExecuteW(hwnd, L"open", kReleasesPageUrl, nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        } else {
+            wchar_t* m = (wchar_t*)lp;
+            SetWindowTextW(g_status, L"Update check failed");
+            if (g_updateManual)
+                MessageBoxW(hwnd, m ? m : L"Update failed.", L"Update", MB_OK | MB_ICONWARNING);
+            free(m);
+        }
+        return 0;
+    }
     case WM_DESTROY:
         g_cancelFlag = true;
         g_scanGate.setPaused(false);
         if (g_scanThread.joinable()) g_scanThread.join();
+        if (g_updateThread.joinable()) g_updateThread.join();
+        { MSG pending{};
+          while (PeekMessageW(&pending, hwnd, WM_APP_UPDATE_DONE, WM_APP_UPDATE_DONE, PM_REMOVE))
+              if (pending.wParam == 0) free((wchar_t*)pending.lParam); }
         { MSG pending{};
           while (PeekMessageW(&pending, hwnd, WM_APP_DONE, WM_APP_DONE, PM_REMOVE))
               delete (std::vector<ur::Group>*)pending.lParam; }
@@ -2517,6 +2699,23 @@ int runGui(HINSTANCE hInst) {
     if (!g_main) return 1;
     ShowWindow(g_main, SW_SHOW);
     UpdateWindow(g_main);
+
+    /* auto-update: clear a leftover ".old" from a prior self-replace, then, once
+       the user has answered the first-run consent, check GitHub in the
+       background. Presets and workspace are never touched by an update. */
+    ur::cleanupSelfReplace();
+    g_updatePrefs.load(updatePrefsPath());
+    if (!g_updatePrefs.asked) {
+        int r = MessageBoxW(g_main,
+            L"StringRipper can check GitHub for a newer version on startup and "
+            L"install it for you.\r\n\r\nYour presets and saved scans are kept.\r\n\r\n"
+            L"Check for updates automatically?",
+            L"StringRipper updates", MB_YESNO | MB_ICONQUESTION);
+        g_updatePrefs.autoCheck = (r == IDYES);
+        g_updatePrefs.asked = true;
+        g_updatePrefs.save(updatePrefsPath());
+    }
+    if (g_updatePrefs.autoCheck) startUpdateCheck(false);
 
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {

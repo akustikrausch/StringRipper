@@ -6,6 +6,8 @@ Give it a process and it digs through readable memory looking for URLs or whatev
 
 One portable exe. No installer, no DLL mess. It's unsigned for now.
 
+It checks GitHub for a newer version on startup (you get asked once, on first run) and can download and install it in place. Your presets and saved scans are kept. The check is off if you say no; a manual one sits behind the About button.
+
 Dedups overlap windows (hits from different sources stay separate), groups by domain or pattern, sorts Z-A.
 
 URL mode knows http/https, ftp, ws, rtsp, rtmp, mms, udp etc. I made the URL detector a bit picky on purpose. The host has to look real, so random memory garbage containing `://` doesn't flood the results.
