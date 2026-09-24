@@ -551,7 +551,8 @@ enum : int {
     PE_LIST = 5000, PE_NAME, PE_DESC, PE_REGEX, PE_NEW, PE_DELETE, PE_VALIDATE, PE_SAVE, PE_USE, PE_CLOSE,
     PE_ASCII, PE_UTF16, PE_HEX, PE_BASE64, PE_CUSTOM, PE_EMAIL, PE_IPV4, PE_IPV6,
     PE_GUID, PE_APIKEY, PE_FILEPATH, PE_DOWNLOAD, PE_SAMPLE, PE_TEST, PE_ADD_PROFILE,
-    PE_POSITIVE, PE_NEGATIVE, PE_RUN_CASES
+    PE_POSITIVE, PE_NEGATIVE, PE_RUN_CASES, PE_T_PRESETS, PE_T_NAME, PE_T_DESC, PE_T_REGEX,
+    PE_T_DECODERS, PE_T_MODES, PE_STATUS, PE_T_SAMPLE, PE_T_POSITIVE, PE_T_NEGATIVE
 };
 
 HWND g_pe = nullptr, g_peList, g_peName, g_peDesc, g_peRegex, g_peStatus;
@@ -566,7 +567,7 @@ bool peCheck(HWND h) { return SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED;
 void peCheck(HWND h, bool on) { SendMessageW(h, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0); }
 
 HWND peCtl(HWND p, const wchar_t* cls, const wchar_t* text, int id, DWORD style,
-           int x, int y, int w, int h) {
+           int x = 0, int y = 0, int w = 0, int h = 0) {
     HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
                              S(x), S(y), S(w), S(h), p, (HMENU)(INT_PTR)id, nullptr, nullptr);
     SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
@@ -675,55 +676,80 @@ void peClose(HWND h, bool use = false) {
     DestroyWindow(h);
 }
 
+void peLayout(HWND h, int cw, int ch) {
+    cw = MulDiv(cw, 96, g_dpi); ch = MulDiv(ch, 96, g_dpi);
+    const int w = cw - 250, f = std::max(ch - 468, 80);
+    const int fd = f * 62 / 270, fr = f * 70 / 270, fs = f * 68 / 270, fe = f - fd - fr - fs;
+    const int a = fd + fr, b = a + fs, pw = (w - 13) * 222 / 457, nx = 233 + pw, nw = w - 13 - pw;
+    const int L[][5] = {
+        {PE_T_PRESETS, 14, 12, 190, 20}, {PE_LIST, 14, 34, 190, 298 + a},
+        {PE_NEW, 14, 344 + a, 88, 28}, {PE_DELETE, 112, 344 + a, 92, 28},
+        {PE_TEST, 14, 408 + a, 190, 28}, {PE_ADD_PROFILE, 14, 443 + a, 190, 28}, {PE_RUN_CASES, 14, 444 + b, 190, 28},
+        {PE_T_NAME, 220, 12, w, 20}, {PE_NAME, 220, 34, w, 26},
+        {PE_T_DESC, 220, 70, w, 20}, {PE_DESC, 220, 92, w, fd},
+        {PE_T_REGEX, 220, 102 + fd, w, 20}, {PE_REGEX, 220, 124 + fd, w, fr},
+        {PE_T_DECODERS, 220, 136 + a, w, 20}, {PE_ASCII, 220, 158 + a, 90, 24}, {PE_UTF16, 315, 158 + a, 90, 24},
+        {PE_HEX, 410, 158 + a, 90, 24}, {PE_BASE64, 505, 158 + a, 100, 24},
+        {PE_T_MODES, 220, 192 + a, w, 20}, {PE_CUSTOM, 220, 214 + a, 90, 24}, {PE_EMAIL, 315, 214 + a, 90, 24},
+        {PE_IPV4, 410, 214 + a, 90, 24}, {PE_IPV6, 505, 214 + a, 90, 24}, {PE_GUID, 600, 214 + a, 90, 24},
+        {PE_APIKEY, 220, 242 + a, 90, 24}, {PE_FILEPATH, 315, 242 + a, 90, 24}, {PE_DOWNLOAD, 410, 242 + a, 100, 24},
+        {PE_STATUS, 220, 278 + a, w, 22},
+        {PE_VALIDATE, 220, 344 + a, 112, 28}, {PE_SAVE, 342, 344 + a, 100, 28},
+        {PE_USE, 452, 344 + a, 112, 28}, {PE_CLOSE, 574, 344 + a, 116, 28},
+        {PE_T_SAMPLE, 220, 384 + a, w, 20}, {PE_SAMPLE, 220, 408 + a, w, fs},
+        {PE_T_POSITIVE, 220, 420 + b, pw, 20}, {PE_T_NEGATIVE, nx, 420 + b, nw, 20},
+        {PE_POSITIVE, 220, 444 + b, pw, fe}, {PE_NEGATIVE, nx, 444 + b, nw, fe},
+    };
+    for (const auto& l : L) MoveWindow(GetDlgItem(h, l[0]), S(l[1]), S(l[2]), S(l[3]), S(l[4]), TRUE);
+}
+
 LRESULT CALLBACK PresetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
         g_peIndex = -1;
         g_peSaved = ur::serializeUserPresets(g_userPresets);
-        peCtl(h, L"STATIC", L"Presets", 0, 0, 14, 12, 190, 20);
-        g_peList = peCtl(h, L"LISTBOX", L"", PE_LIST, LBS_NOTIFY | WS_BORDER | WS_VSCROLL, 14, 34, 190, 430);
-        peCtl(h, L"STATIC", L"Name", 0, 0, 220, 12, 470, 20);
-        g_peName = peCtl(h, L"EDIT", L"", PE_NAME, ES_AUTOHSCROLL | WS_BORDER, 220, 34, 470, 26);
-        peCtl(h, L"STATIC", L"Description", 0, 0, 220, 70, 470, 20);
-        g_peDesc = peCtl(h, L"EDIT", L"", PE_DESC, ES_MULTILINE | ES_AUTOVSCROLL | WS_BORDER | WS_VSCROLL,
-                         220, 92, 470, 62);
-        peCtl(h, L"STATIC", L"Regex (ECMAScript)", 0, 0, 220, 164, 470, 20);
-        g_peRegex = peCtl(h, L"EDIT", L"", PE_REGEX, ES_MULTILINE | ES_AUTOVSCROLL | WS_BORDER | WS_VSCROLL,
-                          220, 186, 470, 70);
-        peCtl(h, L"STATIC", L"Decoders", 0, 0, 220, 268, 470, 20);
-        g_peAscii = peCtl(h, L"BUTTON", L"ASCII", PE_ASCII, BS_AUTOCHECKBOX, 220, 290, 90, 24);
-        g_peUtf16 = peCtl(h, L"BUTTON", L"UTF-16", PE_UTF16, BS_AUTOCHECKBOX, 315, 290, 90, 24);
-        g_peHex = peCtl(h, L"BUTTON", L"Hex", PE_HEX, BS_AUTOCHECKBOX, 410, 290, 90, 24);
-        g_peBase64 = peCtl(h, L"BUTTON", L"Base64", PE_BASE64, BS_AUTOCHECKBOX, 505, 290, 100, 24);
-        peCtl(h, L"STATIC", L"Regex modes", 0, 0, 220, 324, 470, 20);
-        g_peCustom = peCtl(h, L"BUTTON", L"Custom", PE_CUSTOM, BS_AUTOCHECKBOX, 220, 346, 90, 24);
-        g_peEmail = peCtl(h, L"BUTTON", L"Email", PE_EMAIL, BS_AUTOCHECKBOX, 315, 346, 90, 24);
-        g_peIpv4 = peCtl(h, L"BUTTON", L"IPv4", PE_IPV4, BS_AUTOCHECKBOX, 410, 346, 90, 24);
-        g_peIpv6 = peCtl(h, L"BUTTON", L"IPv6", PE_IPV6, BS_AUTOCHECKBOX, 505, 346, 90, 24);
-        g_peGuid = peCtl(h, L"BUTTON", L"GUID", PE_GUID, BS_AUTOCHECKBOX, 600, 346, 90, 24);
-        g_peApi = peCtl(h, L"BUTTON", L"API key", PE_APIKEY, BS_AUTOCHECKBOX, 220, 374, 90, 24);
-        g_pePath = peCtl(h, L"BUTTON", L"File path", PE_FILEPATH, BS_AUTOCHECKBOX, 315, 374, 90, 24);
-        g_peDownload = peCtl(h, L"BUTTON", L"Download", PE_DOWNLOAD, BS_AUTOCHECKBOX, 410, 374, 100, 24);
-        g_peStatus = peCtl(h, L"STATIC", L"Regex status: not validated", 0, 0, 220, 410, 470, 22);
-        peCtl(h, L"STATIC", L"Test text: one candidate per line (patterns only)", 0, 0, 220, 516, 470, 20);
+        peCtl(h, L"STATIC", L"Presets", PE_T_PRESETS, 0);
+        g_peList = peCtl(h, L"LISTBOX", L"", PE_LIST, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_BORDER | WS_VSCROLL);
+        peCtl(h, L"STATIC", L"Name", PE_T_NAME, 0);
+        g_peName = peCtl(h, L"EDIT", L"", PE_NAME, ES_AUTOHSCROLL | WS_BORDER);
+        peCtl(h, L"STATIC", L"Description", PE_T_DESC, 0);
+        g_peDesc = peCtl(h, L"EDIT", L"", PE_DESC, ES_MULTILINE | ES_AUTOVSCROLL | WS_BORDER | WS_VSCROLL);
+        peCtl(h, L"STATIC", L"Regex (ECMAScript)", PE_T_REGEX, 0);
+        g_peRegex = peCtl(h, L"EDIT", L"", PE_REGEX, ES_MULTILINE | ES_AUTOVSCROLL | WS_BORDER | WS_VSCROLL);
+        peCtl(h, L"STATIC", L"Decoders", PE_T_DECODERS, 0);
+        g_peAscii = peCtl(h, L"BUTTON", L"ASCII", PE_ASCII, BS_AUTOCHECKBOX);
+        g_peUtf16 = peCtl(h, L"BUTTON", L"UTF-16", PE_UTF16, BS_AUTOCHECKBOX);
+        g_peHex = peCtl(h, L"BUTTON", L"Hex", PE_HEX, BS_AUTOCHECKBOX);
+        g_peBase64 = peCtl(h, L"BUTTON", L"Base64", PE_BASE64, BS_AUTOCHECKBOX);
+        peCtl(h, L"STATIC", L"Regex modes", PE_T_MODES, 0);
+        g_peCustom = peCtl(h, L"BUTTON", L"Custom", PE_CUSTOM, BS_AUTOCHECKBOX);
+        g_peEmail = peCtl(h, L"BUTTON", L"Email", PE_EMAIL, BS_AUTOCHECKBOX);
+        g_peIpv4 = peCtl(h, L"BUTTON", L"IPv4", PE_IPV4, BS_AUTOCHECKBOX);
+        g_peIpv6 = peCtl(h, L"BUTTON", L"IPv6", PE_IPV6, BS_AUTOCHECKBOX);
+        g_peGuid = peCtl(h, L"BUTTON", L"GUID", PE_GUID, BS_AUTOCHECKBOX);
+        g_peApi = peCtl(h, L"BUTTON", L"API key", PE_APIKEY, BS_AUTOCHECKBOX);
+        g_pePath = peCtl(h, L"BUTTON", L"File path", PE_FILEPATH, BS_AUTOCHECKBOX);
+        g_peDownload = peCtl(h, L"BUTTON", L"Download", PE_DOWNLOAD, BS_AUTOCHECKBOX);
+        g_peStatus = peCtl(h, L"STATIC", L"Regex status: not validated", PE_STATUS, 0);
+        peCtl(h, L"STATIC", L"Test text: one candidate per line (patterns only)", PE_T_SAMPLE, 0);
         g_peSample = peCtl(h, L"EDIT", L"", PE_SAMPLE,
-            ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_BORDER | WS_VSCROLL, 220, 540, 470, 68);
+            ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_BORDER | WS_VSCROLL);
         SendMessageW(g_peSample, EM_SETLIMITTEXT, 2048, 0);
-        peCtl(h, L"BUTTON", L"Test sample", PE_TEST, BS_PUSHBUTTON, 14, 540, 190, 28);
-        peCtl(h, L"BUTTON", L"Add to profile", PE_ADD_PROFILE, BS_PUSHBUTTON, 14, 575, 190, 28);
-        peCtl(h, L"STATIC", L"Positive examples (one per line)", 0, 0, 220, 620, 222, 20);
-        peCtl(h, L"STATIC", L"Negative examples (one per line)", 0, 0, 455, 620, 235, 20);
+        peCtl(h, L"BUTTON", L"Test sample", PE_TEST, BS_PUSHBUTTON);
+        peCtl(h, L"BUTTON", L"Add to profile", PE_ADD_PROFILE, BS_PUSHBUTTON);
+        peCtl(h, L"STATIC", L"Positive examples (one per line)", PE_T_POSITIVE, 0);
+        peCtl(h, L"STATIC", L"Negative examples (one per line)", PE_T_NEGATIVE, 0);
         g_pePositive = peCtl(h, L"EDIT", L"", PE_POSITIVE,
-            ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_BORDER | WS_VSCROLL, 220, 644, 222, 70);
+            ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_BORDER | WS_VSCROLL);
         g_peNegative = peCtl(h, L"EDIT", L"", PE_NEGATIVE,
-            ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_BORDER | WS_VSCROLL, 455, 644, 235, 70);
-        peCtl(h, L"BUTTON", L"Run saved cases", PE_RUN_CASES, BS_PUSHBUTTON, 14, 644, 190, 28);
-        peCtl(h, L"BUTTON", L"New", PE_NEW, BS_PUSHBUTTON, 14, 476, 88, 28);
-        peCtl(h, L"BUTTON", L"Delete", PE_DELETE, BS_PUSHBUTTON, 112, 476, 92, 28);
-        peCtl(h, L"BUTTON", L"Check syntax", PE_VALIDATE, BS_PUSHBUTTON, 220, 476, 112, 28);
-        peCtl(h, L"BUTTON", L"Save all", PE_SAVE, BS_PUSHBUTTON, 342, 476, 100, 28);
-        peCtl(h, L"BUTTON", L"Use preset", PE_USE, BS_DEFPUSHBUTTON, 452, 476, 112, 28);
-        peCtl(h, L"BUTTON", L"Close", PE_CLOSE, BS_PUSHBUTTON, 574, 476, 116, 28);
+            ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_BORDER | WS_VSCROLL);
+        peCtl(h, L"BUTTON", L"Run saved cases", PE_RUN_CASES, BS_PUSHBUTTON);
+        peCtl(h, L"BUTTON", L"New", PE_NEW, BS_PUSHBUTTON);
+        peCtl(h, L"BUTTON", L"Delete", PE_DELETE, BS_PUSHBUTTON);
+        peCtl(h, L"BUTTON", L"Check syntax", PE_VALIDATE, BS_PUSHBUTTON);
+        peCtl(h, L"BUTTON", L"Save all", PE_SAVE, BS_PUSHBUTTON);
+        peCtl(h, L"BUTTON", L"Use preset", PE_USE, BS_DEFPUSHBUTTON);
+        peCtl(h, L"BUTTON", L"Close", PE_CLOSE, BS_PUSHBUTTON);
         peFillList();
         if (!g_userPresets.empty()) peShow(0);
         return 0;
@@ -813,6 +839,15 @@ LRESULT CALLBACK PresetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             SetWindowTextW(g_peStatus, L"Regex status: not validated");
         }
         break;
+    case WM_SIZE:
+        if (wp != SIZE_MINIMIZED) peLayout(h, LOWORD(lp), HIWORD(lp));
+        return 0;
+    case WM_GETMINMAXINFO: {
+        RECT r{0, 0, S(720), S(612)};
+        AdjustWindowRectEx(&r, (DWORD)GetWindowLongPtrW(h, GWL_STYLE), FALSE, (DWORD)GetWindowLongPtrW(h, GWL_EXSTYLE));
+        ((MINMAXINFO*)lp)->ptMinTrackSize = {r.right - r.left, r.bottom - r.top};
+        return 0;
+    }
     case WM_NOTIFY: {
         auto d = (const NMCUSTOMDRAW*)lp;
         const int id = (int)d->hdr.idFrom;
@@ -833,7 +868,9 @@ LRESULT CALLBACK PresetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_CLOSE: peClose(h); return 0;
     case WM_DESTROY:
-        g_pe = nullptr; EnableWindow(g_main, TRUE); SetForegroundWindow(g_main); return 0;
+        g_pe = nullptr; EnableWindow(g_main, TRUE);
+        if (IsIconic(g_main)) ShowWindow(g_main, SW_RESTORE);
+        SetForegroundWindow(g_main); return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -843,16 +880,25 @@ void showPresetEditor() {
     WNDCLASSEXW wc{ sizeof(wc) };
     wc.lpfnWndProc = PresetProc; wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hbrBackground = g_bgBrush;
+    wc.hIcon = wc.hIconSm = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
     wc.lpszClassName = L"StringRipperPresetEditor";
     RegisterClassExW(&wc);
-    RECT r{0, 0, S(720), S(738)};
-    AdjustWindowRectEx(&r, WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    const DWORD st = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MAXIMIZEBOX | WS_CLIPCHILDREN;
+    RECT r{0, 0, S(720), S(738)}, m;
+    AdjustWindowRectEx(&r, st, FALSE, WS_EX_DLGMODALFRAME);
+    MONITORINFO mi{sizeof(mi)};
+    GetMonitorInfoW(MonitorFromWindow(g_main, MONITOR_DEFAULTTONEAREST), &mi);
+    GetWindowRect(g_main, &m);
+    const RECT& a = mi.rcWork;
+    const int w = std::min<int>(r.right - r.left, a.right - a.left), hh = std::min<int>(r.bottom - r.top, a.bottom - a.top);
+    const int x = std::clamp<int>((m.left + m.right - w) / 2, a.left, a.right - w);
+    const int y = std::clamp<int>((m.top + m.bottom - hh) / 2, a.top, a.bottom - hh);
     EnableWindow(g_main, FALSE);
-        g_pe = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Regex User Presets",
-        WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
-        g_main, nullptr, wc.hInstance, nullptr);
+    g_pe = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Regex User Presets", st, x, y, w, hh,
+                           nullptr, nullptr, wc.hInstance, nullptr);
     if (!g_pe) { EnableWindow(g_main, TRUE); return; }
     ShowWindow(g_pe, SW_SHOW); UpdateWindow(g_pe);
+    ShowWindow(g_main, SW_SHOWMINNOACTIVE);
 }
 
 void showAbout() {
