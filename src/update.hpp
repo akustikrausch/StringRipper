@@ -263,11 +263,14 @@ inline void cleanupSelfReplace() {
     std::filesystem::remove(std::filesystem::path(exe).concat(L".old"), ec);
 }
 
-// Self-replace: rename the running exe aside, move the verified download into
-// its place, relaunch, and quit. Presets and workspace live elsewhere and are
-// untouched. Returns false (and leaves everything as-is) when the exe's folder
-// is not writable — the caller then falls back to opening the release page.
-inline bool selfReplaceAndRelaunch(const std::filesystem::path& downloaded, std::string* err) {
+// Rename the running exe aside and move the verified download into its place.
+// Presets and workspace live elsewhere and are untouched. Returns false (and
+// rolls back) when the exe's folder is not writable — the caller then falls
+// back to opening the release page. Relaunch is separate (relaunchSelf) so the
+// caller can release its single-instance mutex in between: otherwise the fresh
+// process races the still-closing old one for the mutex and bows out, leaving
+// nothing running after an update.
+inline bool selfReplace(const std::filesystem::path& downloaded, std::string* err) {
     wchar_t exeBuf[MAX_PATH]{}; GetModuleFileNameW(nullptr, exeBuf, MAX_PATH);
     std::filesystem::path exe = exeBuf, old = std::filesystem::path(exe).concat(L".old");
     std::error_code ec; std::filesystem::remove(old, ec);
@@ -278,13 +281,16 @@ inline bool selfReplaceAndRelaunch(const std::filesystem::path& downloaded, std:
         MoveFileExW(old.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING);   // roll back
         if (err) *err = "cannot write the new version"; return false;
     }
+    return true;
+}
+inline void relaunchSelf() {
+    wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr, exe, MAX_PATH);
     STARTUPINFOW si{sizeof(si)}; PROCESS_INFORMATION pi{};
-    std::wstring cmd = L"\"" + exe.wstring() + L"\"";
-    if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
-                       exe.parent_path().c_str(), &si, &pi)) {
+    std::wstring cmd = L"\"" + std::wstring(exe) + L"\"";
+    if (CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                       std::filesystem::path(exe).parent_path().c_str(), &si, &pi)) {
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
     }
-    return true;
 }
 
 } // namespace ur

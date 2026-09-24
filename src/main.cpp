@@ -342,6 +342,7 @@ ur::UpdateInfo g_update;
 std::thread g_updateThread;
 std::atomic<bool> g_updateBusy{false};
 bool g_updateManual = false;                       // true while a user-triggered check runs
+HANDLE g_instanceMutex = nullptr;                  // single-instance guard, released before an update relaunch
 std::filesystem::path updatePrefsPath() { return appDataDir() / L"update.ini"; }
 std::vector<ur::UserPreset> g_userPresets;
 std::filesystem::path g_presetPath;
@@ -2637,8 +2638,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == 1) {
             if (g_updateThread.joinable()) g_updateThread.join();
             std::string err;
-            if (ur::selfReplaceAndRelaunch(g_updateDownloadPath, &err)) {
-                DestroyWindow(hwnd);   // new instance is already launching
+            if (ur::selfReplace(g_updateDownloadPath, &err)) {
+                // Release the single-instance mutex first, or the relaunched
+                // exe collides with this still-closing one and bows out.
+                if (g_instanceMutex) { ReleaseMutex(g_instanceMutex); CloseHandle(g_instanceMutex); g_instanceMutex = nullptr; }
+                ur::relaunchSelf();
+                DestroyWindow(hwnd);
             } else {
                 std::error_code ec; std::filesystem::remove(g_updateDownloadPath, ec);
                 std::wstring m = L"Could not install the update: " + widen(err) +
@@ -2765,5 +2770,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
         }
         return 0;
     }
+    g_instanceMutex = mtx;
     return runGui(hInst);
 }
