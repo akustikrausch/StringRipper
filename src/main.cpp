@@ -455,6 +455,27 @@ void drawCombo(const DRAWITEMSTRUCT* d) {
     SelectObject(d->hDC, of);
 }
 
+void drawCheck(const NMCUSTOMDRAW* d) {
+    const LRESULT st = SendMessageW(d->hdr.hwndFrom, BM_GETSTATE, 0, 0);
+    const bool on = (st & BST_CHECKED) != 0, hot = (st & (BST_HOT | BST_PUSHED)) != 0;
+    const int n = S(14), y = (d->rc.top + d->rc.bottom - n) / 2;
+    RECT r = d->rc, k{r.left, y, r.left + n, y + n};
+    FillRect(d->hdc, &r, g_bgBrush);
+    const COLORREF fill = on ? (hot ? kAccentHot : kAccent) : kBg2;
+    roundRect(d->hdc, k, S(6), fill, (st & BST_FOCUS) ? kAccent2 : on ? fill : hot ? kText2 : kText3);
+    if (on) {
+        HPEN pen = CreatePen(PS_SOLID, S(2), RGB(0xFF, 0xFF, 0xFF));
+        HGDIOBJ op = SelectObject(d->hdc, pen);
+        POINT v[3] = {{k.left + S(3), y + S(7)}, {k.left + S(6), y + S(10)}, {k.left + S(11), y + S(4)}};
+        Polyline(d->hdc, v, 3);
+        SelectObject(d->hdc, op); DeleteObject(pen);
+    }
+    wchar_t t[32] = L"";
+    GetWindowTextW(d->hdr.hwndFrom, t, 32);
+    r.left = k.right + S(6);
+    inkText(d->hdc, t, r, g_font, kText, DT_SINGLELINE | DT_VCENTER);
+}
+
 void setFont(HWND h, HFONT f) { SendMessageW(h, WM_SETFONT, (WPARAM)f, TRUE); }
 
 int textW(HWND h, HFONT f, int track = 0) {
@@ -792,6 +813,13 @@ LRESULT CALLBACK PresetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             SetWindowTextW(g_peStatus, L"Regex status: not validated");
         }
         break;
+    case WM_NOTIFY: {
+        auto d = (const NMCUSTOMDRAW*)lp;
+        const int id = (int)d->hdr.idFrom;
+        if (d->hdr.code != NM_CUSTOMDRAW || id < PE_ASCII || id > PE_DOWNLOAD) break;
+        if (d->dwDrawStage != CDDS_PREPAINT) return CDRF_DODEFAULT;
+        drawCheck(d); return CDRF_SKIPDEFAULT;
+    }
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN: {
         HDC dc = (HDC)wp; SetTextColor(dc, kText); SetBkColor(dc, kBg); return (LRESULT)g_bgBrush;
