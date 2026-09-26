@@ -10,7 +10,7 @@ Umlauts and other non-ASCII letters stay inside the string, `C:\Users\Jürgen\..
 
 Memory hits also say where they sat: `xul.dll .rdata`, `mapped foo.dat`, `stack`, `heap` or `private`. It's part of the source, so the filter box finds them. `heap` means the process heaps' base segments, everything else unnamed stays `private`.
 
-One portable exe. No installer, no DLL mess. It's unsigned for now.
+One portable exe. No installer, no DLL mess.
 
 It checks GitHub for a newer version on startup (you get asked once, on first run) and can download and install it in place. Your presets and saved scans are kept. The check is off if you say no; a manual one sits behind the About button.
 
@@ -132,7 +132,7 @@ Run it without arguments for the GUI. Pick or filter a process or file, choose U
 
 Drop files or folders on the window or straight on the exe. Several at once is fine, folders get walked. On the window it only sets the source and you hit Scan, on the exe it scans right away. Only one instance runs, a second launch hands its files to the first and bows out, so scans never race.
 
-The process list follows programs as they come and go, and if the process you scanned exits the results clear themselves (with All instances: once the last one is gone). Progress shows a percent with two decimals, against a plan made up front: file sizes, or the readable memory regions of a process (first 2 GiB). Pause and Cancel take effect between work chunks. Crap filter (on by default in URL mode) drops placeholder and XML-namespace hosts. The Download preset catches partial URLs ending in .exe/.zip/.dmg/.pkg and the like. A bare path like `/plugins/AmpliTube5/AmpliTube_5_10_9.zip` gets the host of a full URL from the same process or file that shares its folder (`https://g1.ikmultimedia.com/plugins/AmpliTube5/...`). No shared folder, or two hosts equally likely: it stays a path. The details say which URL the host came from.
+The process list follows programs as they come and go, and if the process you scanned exits the results clear themselves (with All instances: once the last one is gone). Progress shows a percent with two decimals, against a plan made up front: file sizes, or the readable memory regions of a process (first 2 GiB). Pause and Cancel take effect between work chunks. Crap filter (on by default in URL mode) drops placeholder and XML-namespace hosts. The Download preset catches partial URLs ending in .exe/.zip/.dmg/.pkg and the like. A bare path like `/downloads/tool/setup_2_1.zip` gets the host of a full URL from the same process or file that shares its folder (`https://cdn.example.com/downloads/tool/...`). No shared folder, or two hosts equally likely: it stays a path. The details say which URL the host came from.
 
 Audit notes, tests and benchmark instructions are in [docs/AUDIT-1.2.md](docs/AUDIT-1.2.md).
 
