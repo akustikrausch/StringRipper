@@ -94,3 +94,10 @@ execute_process(COMMAND "${CLI}" --ignore example.com --file "${WORK}/escaped-in
 if(output MATCHES "cdn.example.com" OR NOT output MATCHES "keep.example.org")
   message(FATAL_ERROR "--ignore example.com must hide cdn.example.com but keep keep.example.org: ${output}")
 endif()
+
+file(WRITE "${WORK}/download-input.txt" "x https://g1.ikmultimedia.com/plugins/AmpliTube5/AmpliTube_5_10_8.zip y\n\"/plugins/AmpliTube5/AmpliTube_5_10_9.zip\"\n")
+execute_process(COMMAND "${CLI}" --file "${WORK}/download-input.txt" --preset fileurl
+  RESULT_VARIABLE rc OUTPUT_VARIABLE output ERROR_VARIABLE err)
+if(NOT rc EQUAL 0 OR NOT output MATCHES "https://g1.ikmultimedia.com/plugins/AmpliTube5/AmpliTube_5_10_9.zip")
+  message(FATAL_ERROR "Partial download path did not get its host: ${rc} ${err} ${output}")
+endif()

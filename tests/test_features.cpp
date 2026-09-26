@@ -83,5 +83,32 @@ int main() {
         CHECK(ur::comparisonContext("src", esc) != ur::comparisonContext("src", plain));
     }
     std::puts(failures ? "FAILED" : "ALL PASS");
+    {
+        // partial download paths borrow scheme+host from a full URL of the same source
+        auto hit = [](std::string v, std::string src) { ur::Finding f{}; f.value = v; f.source = src; f.group = "Download URL"; return f; };
+        ur::Group dl{"Download URL", {
+            hit("https://g1.ikmultimedia.com/plugins/AmpliTube5/AmpliTube_5_10_8.zip", "pm.exe [heap]"),
+            hit("https://cdn.other.com/misc/tool.exe", "pm.exe [heap]"),
+            hit("/plugins/AmpliTube5/AmpliTube_5_10_9.zip", "pm.exe [xul.dll .rdata]"),
+            hit("plugins/TONEX/TONEX_1_2.zip", "pm.exe [private]"),
+            hit("g1.ikmultimedia.com/plugins/x.dmg", "pm.exe"),
+            hit("/nowhere/else.pkg", "pm.exe"),
+            hit("/plugins/AmpliTube5/other.zip", "other.exe"),
+            hit("setup.exe", "pm.exe")}};
+        ur::Group tie{"Download URL", {
+            hit("https://a.com/d/1.zip", "t"), hit("https://b.com/d/2.zip", "t"), hit("/d/3.zip", "t")}};
+        std::vector<ur::Group> groups{dl, tie};
+        CHECK(ur::resolveDownloadHosts(groups) == 3);
+        const auto& r = groups[0].items;
+        CHECK(r[2].value == "https://g1.ikmultimedia.com/plugins/AmpliTube5/AmpliTube_5_10_9.zip");
+        CHECK(r[2].captures.size() == 2 && r[2].captures[0].second == "/plugins/AmpliTube5/AmpliTube_5_10_9.zip" &&
+              r[2].captures[1].second == "https://g1.ikmultimedia.com/plugins/AmpliTube5/AmpliTube_5_10_8.zip");
+        CHECK(r[3].value == "https://g1.ikmultimedia.com/plugins/TONEX/TONEX_1_2.zip");
+        CHECK(r[4].value == "https://g1.ikmultimedia.com/plugins/x.dmg");
+        CHECK(r[5].value == "/nowhere/else.pkg" && r[5].captures.empty());       // no shared directory
+        CHECK(r[6].value == "/plugins/AmpliTube5/other.zip");                    // other source
+        CHECK(r[7].value == "setup.exe");                                        // no path at all
+        CHECK(groups[1].items[2].value == "/d/3.zip");                           // two hosts tied
+    }
     return failures ? 1 : 0;
 }

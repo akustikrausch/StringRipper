@@ -169,6 +169,7 @@ int main(int argc, char** argv) {
 
     bool denied = false;
     auto groups = ur::scanPaths(*det, inputs, &denied, nullptr, {}, selection);
+    ur::resolveDownloadHosts(groups);
     if (!ignore.empty()) groups = ur::filterIgnored(groups, ur::IgnoreRules::parse(ignore));
     if (denied) std::fprintf(stderr, "note: some sources could not be read\n");
 

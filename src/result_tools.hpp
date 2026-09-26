@@ -158,6 +158,82 @@ inline std::string comparisonContext(const std::string& source, const Options& o
     return key;
 }
 
+/* Download URL hits that are only a path ("/plugins/AmpliTube5/x.zip") get the
+   scheme and host of a full URL from the same source (process or file, region
+   ignored) that shares the longest leading directory with them. No shared
+   directory, or two hosts tied: the hit stays as found. "g1.host.com/x.zip"
+   gets the scheme of a full URL on that host. The value becomes the full URL;
+   captures keep what was found ("path") and the URL the host came from ("host from"). */
+inline std::size_t resolveDownloadHosts(std::vector<Group>& groups) {
+    auto low = [](std::string s) { for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c))); return s; };
+    auto base = [](const std::string& src) {
+        auto at = src.rfind(" [");
+        return at != std::string::npos && !src.empty() && src.back() == ']' ? src.substr(0, at) : src;
+    };
+    auto dirs = [&](const std::string& path) {
+        std::vector<std::string> out;
+        std::size_t a = 0;
+        for (std::size_t b; (b = path.find('/', a)) != std::string::npos; a = b + 1)
+            if (b > a) out.push_back(low(path.substr(a, b - a)));
+        return out;
+    };
+    struct Full { std::string origin, host, url; std::vector<std::string> dirs; };
+    std::unordered_map<std::string, std::vector<Full>> known;
+    for (const auto& g : groups) for (const auto& f : g.items) {
+        auto sep = f.value.find("://");
+        if (sep == std::string::npos || sep == 0) continue;
+        auto slash = f.value.find('/', sep + 3);
+        std::string origin = f.value.substr(0, slash), path = slash == std::string::npos ? "/" : f.value.substr(slash);
+        path = path.substr(0, path.find_first_of("?#"));
+        std::string host = low(origin.substr(sep + 3));
+        host = host.substr(0, host.find(':'));
+        known[base(f.source)].push_back({origin, host, f.value, dirs(path)});
+    }
+    std::size_t resolved = 0;
+    for (auto& g : groups) {
+        if (g.name != "Download URL") continue;
+        for (auto& f : g.items) {
+            if (f.value.find("://") != std::string::npos || f.value.find('/') == std::string::npos) continue;
+            auto it = known.find(base(f.source));
+            if (it == known.end()) continue;
+            const Full* pick = nullptr;
+            std::string path = f.value;
+            if (path[0] != '/') {
+                std::string first = low(path.substr(0, path.find('/')));
+                for (const auto& u : it->second) if (u.host == first) { pick = &u; break; }
+                if (pick) {
+                    f.captures.insert(f.captures.begin(), {{"path", f.value}, {"host from", pick->url}});
+                    f.value = pick->origin.substr(0, pick->origin.find("://") + 3) + f.value;
+                    ++resolved;
+                    continue;
+                }
+                path = "/" + path;
+            }
+            const auto want = dirs(path);
+            std::size_t best = 0;
+            std::map<std::string, std::pair<std::size_t, const Full*>> hosts;   // origin -> votes at best depth
+            for (const auto& u : it->second) {
+                std::size_t n = 0;
+                while (n < want.size() && n < u.dirs.size() && want[n] == u.dirs[n]) ++n;
+                if (!n || n < best) continue;
+                if (n > best) { best = n; hosts.clear(); }
+                auto& h = hosts[low(u.origin)];
+                ++h.first; if (!h.second) h.second = &u;
+            }
+            std::size_t top = 0, second = 0;
+            for (const auto& [origin, h] : hosts) {
+                if (h.first > top) { second = top; top = h.first; pick = h.second; }
+                else if (h.first > second) second = h.first;
+            }
+            if (!pick || top == second) continue;
+            f.captures.insert(f.captures.begin(), {{"path", f.value}, {"host from", pick->url}});
+            f.value = pick->origin + path;
+            ++resolved;
+        }
+    }
+    return resolved;
+}
+
 /* ignore list, one rule per line, case-insensitive:
      microsoft.com   that group and every group ending in .microsoft.com
                      (URL hosts; a regex pattern label matches by name)

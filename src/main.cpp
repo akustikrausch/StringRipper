@@ -259,6 +259,7 @@ static int runCli(int argc, wchar_t** argv) {
         groups = ur::scanPaths(*det, inputs, &fdenied);
         if (fdenied) std::fprintf(stderr, "note: some of that could not be read; try an elevated shell\n");
     }
+    ur::resolveDownloadHosts(groups);
     if (!ignore.empty()) groups = ur::filterIgnored(groups, ur::IgnoreRules::parse(ignore));
 
     std::string text = ur::exportResults(groups, format);
@@ -1360,6 +1361,7 @@ void onDone(std::vector<ur::Group>* groups) {
     KillTimer(g_main, TIMER_PROGRESS);
     g_lastResults = std::move(*groups);
     delete groups;
+    ur::resolveDownloadHosts(g_lastResults);
     const bool complete = !g_cancelFlag && g_scanError.empty() && !g_scanDenied &&
                           !g_scanDeniedFiles && !g_progress.skipped;
     g_hasComparison = complete && g_comparison.matches(g_scanContext);
