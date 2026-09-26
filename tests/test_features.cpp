@@ -65,6 +65,23 @@ int main() {
     try { ur::presetCli({"--user-preset"}, "missing.ini"); }
     catch (const std::invalid_argument&) { threw = true; }
     CHECK(threw);
+    {
+        auto r = ur::IgnoreRules::parse({"  Microsoft.com ", "# note", "", "*TELEMETRY*", "=https://x.example.com/a"});
+        CHECK(r.hidesGroup("login.microsoft.com") && r.hidesGroup("microsoft.com"));
+        CHECK(!r.hidesGroup("notmicrosoft.com") && !r.hidesGroup("microsoft.com.evil.net"));
+        CHECK(r.hidesValue("https://api.example.com/telemetry/v2"));
+        CHECK(r.hidesValue("HTTPS://X.EXAMPLE.COM/A") && !r.hidesValue("https://x.example.com/ab"));
+        CHECK(ur::IgnoreRules::parse({"# only a comment", " "}).empty());
+        std::vector<ur::Group> g{{"login.microsoft.com", {{"https://login.microsoft.com/", ur::Enc::Ascii, "s", "login.microsoft.com"}}},
+                                 {"cdn.example.com", {{"https://cdn.example.com/app.zip", ur::Enc::Ascii, "s", "cdn.example.com"},
+                                                      {"https://cdn.example.com/telemetry", ur::Enc::Ascii, "s", "cdn.example.com"}}}};
+        std::size_t hidden = 0;
+        auto kept = ur::filterIgnored(g, r, &hidden);
+        CHECK(hidden == 2 && kept.size() == 1 && kept[0].items.size() == 1 &&
+              kept[0].items[0].value == "https://cdn.example.com/app.zip");
+        ur::Options esc, plain; plain.escaped = false;
+        CHECK(ur::comparisonContext("src", esc) != ur::comparisonContext("src", plain));
+    }
     std::puts(failures ? "FAILED" : "ALL PASS");
     return failures ? 1 : 0;
 }

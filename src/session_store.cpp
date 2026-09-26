@@ -43,6 +43,7 @@ SessionStore::SessionStore(const std::filesystem::path& file) {
         exec("CREATE TABLE IF NOT EXISTS captures(finding_id INTEGER NOT NULL REFERENCES findings(id) ON DELETE CASCADE, name TEXT NOT NULL, value TEXT NOT NULL);");
         exec("CREATE TABLE IF NOT EXISTS jobs(name TEXT PRIMARY KEY, payload TEXT NOT NULL);");
         exec("CREATE TABLE IF NOT EXISTS favorites(kind TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY(kind,target));");
+        exec("CREATE TABLE IF NOT EXISTS ignore_rules(pos INTEGER PRIMARY KEY, rule TEXT NOT NULL);");
     } catch (...) {
         sqlite3_close(db_);
         db_ = nullptr;
@@ -140,6 +141,24 @@ void SessionStore::setFavorite(const std::string& kind, const std::string& targe
     auto st = prepare(db_, favorite ? "INSERT OR IGNORE INTO favorites(kind,target) VALUES(?,?)" :
                                     "DELETE FROM favorites WHERE kind=? AND target=?");
     bindText(st.get(), 1, kind); bindText(st.get(), 2, target); stepDone(db_, st.get());
+}
+std::vector<std::string> SessionStore::ignoreRules() const {
+    auto st = prepare(db_, "SELECT rule FROM ignore_rules ORDER BY pos");
+    std::vector<std::string> out;
+    while (sqlite3_step(st.get()) == SQLITE_ROW) out.push_back(column(st.get(), 0));
+    return out;
+}
+void SessionStore::setIgnoreRules(const std::vector<std::string>& rules) {
+    exec("BEGIN IMMEDIATE");
+    try {
+        exec("DELETE FROM ignore_rules");
+        auto st = prepare(db_, "INSERT INTO ignore_rules(rule) VALUES(?)");
+        for (const auto& rule : rules) {
+            sqlite3_reset(st.get()); sqlite3_clear_bindings(st.get());
+            bindText(st.get(), 1, rule); stepDone(db_, st.get());
+        }
+        exec("COMMIT");
+    } catch (...) { try { exec("ROLLBACK"); } catch (...) {} throw; }
 }
 std::vector<std::string> SessionStore::favorites(const std::string& kind) const {
     auto st = prepare(db_, "SELECT target FROM favorites WHERE kind=? ORDER BY target COLLATE NOCASE"); bindText(st.get(), 1, kind);

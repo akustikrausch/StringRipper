@@ -115,6 +115,40 @@ int main() {
         if (snapshot.completed != 5000) { std::puts("FAIL: file size snapshot exceeded"); ++fail; }
         std::filesystem::remove(path);
     }
+    {
+        // one region, two names: each half keeps its own, nothing is read twice,
+        // and a labeler that gives no end falls back to the whole region
+        MockReader two; two.mem.resize(0x6000);
+        auto at = [&](std::size_t o, const char* s) { std::memcpy(two.mem.data() + o, s, std::strlen(s)); };
+        at(0x100, "https://first.akustikrausch.de/a");
+        at(0x3100, "https://second.akustikrausch.de/b");
+        const uint64_t cut = two.base + 0x3000;
+        ur::DriverLimits small; small.window = 4096; small.overlap = 128;
+        ur::ScanProgress split;
+        ur::ScanPool p(det, 2, 8192, &split);
+        auto n = ur::scanReaderInto(two, p, "mock", small, {}, &split, {}, [&](uint64_t a, uint64_t& end) {
+            if (a < cut) { end = cut; return std::string("first"); }
+            return std::string("second");
+        });
+        auto halves = p.finish();
+        std::string first, second;
+        for (const auto& g : halves) for (const auto& f : g.items) {
+            if (f.value.find("first.") != std::string::npos) first = f.source;
+            if (f.value.find("second.") != std::string::npos) second = f.source;
+        }
+        if (n != two.mem.size() || split.total != n || split.completed != n ||
+            first != "mock [first]" || second != "mock [second]") {
+            std::printf("FAIL: split labels (%llu bytes, '%s', '%s')\n", (unsigned long long)n, first.c_str(), second.c_str()); ++fail;
+        }
+        ur::ScanProgress stuck;
+        ur::ScanPool q(det, 2, 8192, &stuck);
+        auto m = ur::scanReaderInto(two, q, "mock", small, {}, &stuck, {},
+                                    [](uint64_t a, uint64_t& end) { end = a; return std::string(); });
+        auto whole = q.finish();
+        if (m != two.mem.size() || ur::countFindings(whole) != 2 || whole.front().items.front().source != "mock") {
+            std::puts("FAIL: a label without an end must cover the rest of the region"); ++fail;
+        }
+    }
     for (auto& g : groups) if (g.name == "host0.example.com") found = true;
     if (!found) { std::printf("FAIL: expected domain not found\n"); ++fail; }
     if (groups.size() != 500) { std::printf("FAIL: expected 500 domains, got %zu\n", groups.size()); ++fail; }

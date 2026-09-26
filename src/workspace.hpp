@@ -88,6 +88,7 @@ inline std::string serializeJob(const ScanJob& j) {
     s << o.extraPatterns.size() << ' ';
     for (const auto& [label, pattern] : o.extraPatterns)
         s << std::quoted(label) << ' ' << std::quoted(pattern) << ' ';
+    s << "ESC " << o.escaped << ' ';
     return s.str();
 }
 
@@ -128,7 +129,12 @@ inline std::optional<ScanJob> parseJob(const std::string& data) {
             o.extraPatterns.emplace_back(std::move(label), std::move(pattern));
         }
         s >> std::ws;
-        if (!s.eof()) return std::nullopt;
+        if (!s.eof()) {
+            std::string tag;
+            if (!(s >> tag >> o.escaped) || tag != "ESC") return std::nullopt;
+            s >> std::ws;
+            if (!s.eof()) return std::nullopt;
+        }
     }
     return j;
 }

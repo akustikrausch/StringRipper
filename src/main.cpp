@@ -136,11 +136,15 @@ static bool elevated() {
 // ---------------------------------------------------------------- CLI
 
 static int runCli(int argc, wchar_t** argv) {
+    UINT cp = 0;
     if (::AttachConsole(ATTACH_PARENT_PROCESS)) {
         FILE* f = nullptr;
         freopen_s(&f, "CONOUT$", "w", stdout);
         freopen_s(&f, "CONOUT$", "w", stderr);
+        cp = GetConsoleOutputCP();
+        SetConsoleOutputCP(CP_UTF8);                  // findings are UTF-8; hand the shell its code page back
     }
+    struct RestoreCp { UINT cp; ~RestoreCp() { if (cp) { std::fflush(stdout); std::fflush(stderr); SetConsoleOutputCP(cp); } } } restore{cp};
     ur::Options o;
     ur::PresetCli preset;
     try {
@@ -151,6 +155,8 @@ static int runCli(int argc, wchar_t** argv) {
     } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 2; }
     std::vector<std::filesystem::path> inputs;
     uint32_t pid = 0;
+    std::string name;
+    std::vector<std::string> ignore;
     std::wstring outFile;
     std::string format = "txt";
     bool help = false;
@@ -162,6 +168,7 @@ static int runCli(int argc, wchar_t** argv) {
         else if (a == L"--cli") {}
         else if (a == L"--file" || a == L"--folder") inputs.push_back(next(i));
         else if (a == L"--pid") pid = (uint32_t)std::wcstoul(next(i).c_str(), nullptr, 10);
+        else if (a == L"--name") name = narrow(next(i).c_str());
         else if (a == L"--regex") {
             o.mode = ur::Mode::Regex; o.customRegex = narrow(next(i).c_str()); o.customLabel = "Custom";
             o.presets.clear(); o.extraPatterns.clear();
@@ -176,6 +183,8 @@ static int runCli(int argc, wchar_t** argv) {
         else if (a == L"--no-utf16") o.utf16 = false;
         else if (a == L"--no-base64") o.base64 = false;
         else if (a == L"--no-hex") o.hex = false;
+        else if (a == L"--no-escaped") o.escaped = false;
+        else if (a == L"--ignore") ignore.push_back(narrow(next(i).c_str()));
         else if (a == L"--out") outFile = next(i);
         else if (a == L"--format") format = narrow(next(i).c_str());
         else if (a == L"--user-preset" || a == L"--presets-file") next(i);
@@ -192,11 +201,12 @@ static int runCli(int argc, wchar_t** argv) {
         return 0;
     }
 
-    if (help || (inputs.empty() && pid == 0)) {
+    if (help || (inputs.empty() && pid == 0 && name.empty())) {
         std::printf(
             "StringRipper " STRINGRIPPER_VERSION " - extract URLs or regex matches from processes and files.\n\n"
             "Usage:\n"
             "  StringRipper.exe --pid N            [options]   scan a running process\n"
+            "  StringRipper.exe --name APP.exe     [options]   scan every running instance of it\n"
             "  StringRipper.exe --file PATH ...    [options]   scan files\n"
             "  StringRipper.exe --folder PATH ...  [options]   scan a folder (recursive)\n\n"
             "Options:\n"
@@ -204,7 +214,8 @@ static int runCli(int argc, wchar_t** argv) {
             "  --preset IDS     regex mode with presets (email,ipv4,ipv6,guid,apikey,filepath)\n"
             "  --scheme LIST    URL mode: only these schemes (e.g. http,https)\n"
             "  --icase          case-insensitive matching\n"
-            "  --no-ascii --no-utf16 --no-base64 --no-hex   turn off a decoder\n"
+            "  --no-ascii --no-utf16 --no-base64 --no-hex --no-escaped   turn off a decoder\n"
+            "  --ignore RULE    hide a host (and its subdomains), a *glob* or =exact value; repeatable\n"
             "  --out FILE       write results to FILE (never uses the clipboard)\n\n"
             "  --format TYPE    txt (default), csv or json\n"
             "  --user-preset NAME       load a saved regex user preset\n"
@@ -221,7 +232,21 @@ static int runCli(int argc, wchar_t** argv) {
     catch (const ur::RegexError& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 2; }
 
     std::vector<ur::Group> groups;
-    if (pid) {
+    if (!name.empty()) {
+        std::vector<uint32_t> pids;
+        for (const auto& p : fxchain::ripBackend().enumerate())
+            if (_stricmp(p.name.c_str(), name.c_str()) == 0 || _stricmp(p.name.c_str(), (name + ".exe").c_str()) == 0)
+                pids.push_back(p.pid);
+        if (pids.empty()) { std::fprintf(stderr, "error: no running process named %s\n", name.c_str()); return 2; }
+        auto scan = ur::scanProcesses(*det, pids, true, {});
+        if (!scan.opened) {
+            std::fprintf(stderr, "error: cannot open %s%s\n", name.c_str(),
+                         scan.needsElevation ? " (needs elevation: run as administrator)" : "");
+            return 2;
+        }
+        if (scan.denied) std::fprintf(stderr, "note: %zu of %zu instances could not be opened\n", scan.denied, pids.size());
+        groups = std::move(scan.groups);
+    } else if (pid) {
         bool denied = false, needsElev = false, fdenied = false;
         groups = ur::scanProcess(*det, pid, {}, denied, needsElev);
         if (denied) {
@@ -234,6 +259,7 @@ static int runCli(int argc, wchar_t** argv) {
         groups = ur::scanPaths(*det, inputs, &fdenied);
         if (fdenied) std::fprintf(stderr, "note: some of that could not be read; try an elevated shell\n");
     }
+    if (!ignore.empty()) groups = ur::filterIgnored(groups, ur::IgnoreRules::parse(ignore));
 
     std::string text = ur::exportResults(groups, format);
     if (!outFile.empty()) {
@@ -255,7 +281,8 @@ enum : int {
     ID_P_EMAIL, ID_P_IPV4, ID_P_IPV6, ID_P_GUID, ID_P_APIKEY, ID_P_PATH,
     ID_CUSTOM, ID_SCAN, ID_CANCEL, ID_RESULTS, ID_COPY, ID_SAVE, ID_EDITOR, ID_ABOUT, ID_FILTER,
     ID_P_DL, ID_CRAP, ID_CLEAR, ID_PRESETS, ID_NEW_ONLY, ID_PAUSE, ID_PAGE_PREV, ID_PAGE_NEXT,
-    ID_WORKSPACE, ID_MONITOR, ID_MONITOR_INTERVAL, ID_SCAN_SETTINGS, ID_DASHBOARD
+    ID_WORKSPACE, ID_MONITOR, ID_MONITOR_INTERVAL, ID_SCAN_SETTINGS, ID_DASHBOARD,
+    ID_ENC_ESC, ID_ALL_INSTANCES, ID_IGNORE
 };
 constexpr UINT WM_APP_DONE = WM_APP + 1;
 constexpr UINT WM_APP_UPDATE_FOUND = WM_APP + 2;   // background check found a newer version
@@ -288,11 +315,11 @@ HWND g_secSource, g_search, g_source, g_refresh, g_file, g_settingsButton, g_src
 HWND g_secFind, g_modeUrl, g_modeRegex, g_urlHint;
 HWND g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_pDl, g_customLabel, g_custom, g_presets;
 HWND g_crap;
-HWND g_secDecode, g_ascii, g_utf16, g_b64, g_hex;
+HWND g_secDecode, g_ascii, g_utf16, g_b64, g_hex, g_esc;
 HWND g_scan, g_pause, g_cancel, g_monitor, g_monitorInterval, g_status;
 HWND g_secResults, g_filter, g_results, g_copy, g_save, g_editor, g_clear, g_about;
 HWND g_pagePrev, g_pageNext, g_pageLabel, g_workspace, g_dashboard;
-HWND g_newOnly;
+HWND g_newOnly, g_allInst, g_ignoreChip;
 ur::ScanComparison g_comparison;
 std::vector<ur::Group> g_newResults;
 std::vector<ur::Group> g_previousComplete;
@@ -329,6 +356,7 @@ uint32_t g_scanPid = 0;
 bool g_scanDenied = false;
 bool g_scanNeedsElev = false;
 uint32_t g_resultsPid = 0;                     /* pid whose results are shown, for cleanup */
+std::vector<uint32_t> g_scanPids, g_resultsPids;  /* same, when all instances of a name were scanned */
 ur::ScanProgress g_progress;
 ur::FileSelection g_fileSelection;
 std::string g_scanError;
@@ -343,6 +371,9 @@ std::thread g_updateThread;
 std::atomic<bool> g_updateBusy{false};
 bool g_updateManual = false;                       // true while a user-triggered check runs
 HANDLE g_instanceMutex = nullptr;                  // single-instance guard, released before an update relaunch
+ur::IgnoreRules g_ignore;                          // rules in effect
+std::vector<std::string> g_ignoreLines;            // as the user wrote them, kept in the workspace db
+std::atomic<std::size_t> g_scanTargetsDenied{0};
 std::filesystem::path updatePrefsPath() { return appDataDir() / L"update.ini"; }
 std::vector<ur::UserPreset> g_userPresets;
 std::filesystem::path g_presetPath;
@@ -405,8 +436,8 @@ void darkTitle(HWND h) {
 
 bool isMode(HWND h) { return h == g_modeUrl || h == g_modeRegex; }
 bool isChip(HWND h) {
-    for (HWND t : {g_ascii, g_utf16, g_b64, g_hex, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath,
-                   g_pDl, g_crap, g_newOnly})
+    for (HWND t : {g_ascii, g_utf16, g_b64, g_hex, g_esc, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath,
+                   g_pDl, g_crap, g_newOnly, g_allInst, g_ignoreChip})
         if (t == h) return true;
     return false;
 }
@@ -559,7 +590,7 @@ void applyUserPreset(const ur::UserPreset& p) {
     g_applyingPreset = true;
     g_profileExtras.clear(); g_profileNames = {p.name};
     setChecked(g_ascii, p.ascii); setChecked(g_utf16, p.utf16);
-    setChecked(g_hex, p.hex); setChecked(g_b64, p.base64);
+    setChecked(g_hex, p.hex); setChecked(g_b64, p.base64); setChecked(g_esc, p.escaped);
     setChecked(g_pEmail, p.email); setChecked(g_pIpv4, p.ipv4);
     setChecked(g_pIpv6, p.ipv6); setChecked(g_pGuid, p.guid);
     setChecked(g_pApi, p.apiKey); setChecked(g_pPath, p.filepath); setChecked(g_pDl, p.download);
@@ -572,14 +603,14 @@ void applyUserPreset(const ur::UserPreset& p) {
 
 enum : int {
     PE_LIST = 5000, PE_NAME, PE_DESC, PE_REGEX, PE_NEW, PE_DELETE, PE_VALIDATE, PE_SAVE, PE_USE, PE_CLOSE,
-    PE_ASCII, PE_UTF16, PE_HEX, PE_BASE64, PE_CUSTOM, PE_EMAIL, PE_IPV4, PE_IPV6,
+    PE_ASCII, PE_UTF16, PE_HEX, PE_BASE64, PE_ESCAPED, PE_CUSTOM, PE_EMAIL, PE_IPV4, PE_IPV6,
     PE_GUID, PE_APIKEY, PE_FILEPATH, PE_DOWNLOAD, PE_SAMPLE, PE_TEST, PE_ADD_PROFILE,
     PE_POSITIVE, PE_NEGATIVE, PE_RUN_CASES, PE_T_PRESETS, PE_T_NAME, PE_T_DESC, PE_T_REGEX,
     PE_T_DECODERS, PE_T_MODES, PE_STATUS, PE_T_SAMPLE, PE_T_POSITIVE, PE_T_NEGATIVE
 };
 
 HWND g_pe = nullptr, g_peList, g_peName, g_peDesc, g_peRegex, g_peStatus;
-HWND g_peAscii, g_peUtf16, g_peHex, g_peBase64, g_peCustom, g_peEmail, g_peIpv4, g_peIpv6;
+HWND g_peAscii, g_peUtf16, g_peHex, g_peBase64, g_peEscaped, g_peCustom, g_peEmail, g_peIpv4, g_peIpv6;
 HWND g_peGuid, g_peApi, g_pePath, g_peDownload;
 HWND g_peSample, g_pePositive, g_peNegative;
 int g_peIndex = -1;
@@ -612,7 +643,7 @@ void peRead() {
     p.positiveExamples = narrow(controlText(g_pePositive).c_str());
     p.negativeExamples = narrow(controlText(g_peNegative).c_str());
     p.ascii = peCheck(g_peAscii); p.utf16 = peCheck(g_peUtf16);
-    p.hex = peCheck(g_peHex); p.base64 = peCheck(g_peBase64);
+    p.hex = peCheck(g_peHex); p.base64 = peCheck(g_peBase64); p.escaped = peCheck(g_peEscaped);
     p.custom = peCheck(g_peCustom); p.email = peCheck(g_peEmail);
     p.ipv4 = peCheck(g_peIpv4); p.ipv6 = peCheck(g_peIpv6);
     p.guid = peCheck(g_peGuid); p.apiKey = peCheck(g_peApi);
@@ -630,7 +661,7 @@ void peShow(int i) {
     SetWindowTextW(g_pePositive, widen(p.positiveExamples).c_str());
     SetWindowTextW(g_peNegative, widen(p.negativeExamples).c_str());
     peCheck(g_peAscii, p.ascii); peCheck(g_peUtf16, p.utf16);
-    peCheck(g_peHex, p.hex); peCheck(g_peBase64, p.base64);
+    peCheck(g_peHex, p.hex); peCheck(g_peBase64, p.base64); peCheck(g_peEscaped, p.escaped);
     peCheck(g_peCustom, p.custom); peCheck(g_peEmail, p.email);
     peCheck(g_peIpv4, p.ipv4); peCheck(g_peIpv6, p.ipv6);
     peCheck(g_peGuid, p.guid); peCheck(g_peApi, p.apiKey);
@@ -712,7 +743,7 @@ void peLayout(HWND h, int cw, int ch) {
         {PE_T_DESC, 220, 70, w, 20}, {PE_DESC, 220, 92, w, fd},
         {PE_T_REGEX, 220, 102 + fd, w, 20}, {PE_REGEX, 220, 124 + fd, w, fr},
         {PE_T_DECODERS, 220, 136 + a, w, 20}, {PE_ASCII, 220, 158 + a, 90, 24}, {PE_UTF16, 315, 158 + a, 90, 24},
-        {PE_HEX, 410, 158 + a, 90, 24}, {PE_BASE64, 505, 158 + a, 100, 24},
+        {PE_HEX, 410, 158 + a, 90, 24}, {PE_BASE64, 505, 158 + a, 100, 24}, {PE_ESCAPED, 600, 158 + a, 90, 24},
         {PE_T_MODES, 220, 192 + a, w, 20}, {PE_CUSTOM, 220, 214 + a, 90, 24}, {PE_EMAIL, 315, 214 + a, 90, 24},
         {PE_IPV4, 410, 214 + a, 90, 24}, {PE_IPV6, 505, 214 + a, 90, 24}, {PE_GUID, 600, 214 + a, 90, 24},
         {PE_APIKEY, 220, 242 + a, 90, 24}, {PE_FILEPATH, 315, 242 + a, 90, 24}, {PE_DOWNLOAD, 410, 242 + a, 100, 24},
@@ -745,6 +776,7 @@ LRESULT CALLBACK PresetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         g_peUtf16 = peCtl(h, L"BUTTON", L"UTF-16", PE_UTF16, BS_AUTOCHECKBOX);
         g_peHex = peCtl(h, L"BUTTON", L"Hex", PE_HEX, BS_AUTOCHECKBOX);
         g_peBase64 = peCtl(h, L"BUTTON", L"Base64", PE_BASE64, BS_AUTOCHECKBOX);
+        g_peEscaped = peCtl(h, L"BUTTON", L"Escaped", PE_ESCAPED, BS_AUTOCHECKBOX);
         peCtl(h, L"STATIC", L"Regex modes", PE_T_MODES, 0);
         g_peCustom = peCtl(h, L"BUTTON", L"Custom", PE_CUSTOM, BS_AUTOCHECKBOX);
         g_peEmail = peCtl(h, L"BUTTON", L"Email", PE_EMAIL, BS_AUTOCHECKBOX);
@@ -825,7 +857,7 @@ LRESULT CALLBACK PresetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 g_profileNames.push_back(p.name);
                 if (p.custom && !p.pattern.empty()) g_profileExtras.emplace_back(p.name, p.pattern);
                 for (auto [control, on] : {std::pair{g_ascii, p.ascii}, {g_utf16, p.utf16},
-                     {g_hex, p.hex}, {g_b64, p.base64}, {g_pEmail, p.email}, {g_pIpv4, p.ipv4},
+                     {g_hex, p.hex}, {g_b64, p.base64}, {g_esc, p.escaped}, {g_pEmail, p.email}, {g_pIpv4, p.ipv4},
                      {g_pIpv6, p.ipv6}, {g_pGuid, p.guid}, {g_pApi, p.apiKey},
                      {g_pPath, p.filepath}, {g_pDl, p.download}})
                     if (on) setChecked(control, true);
@@ -994,6 +1026,15 @@ void autoRefreshProcs() {
     auto now = fxchain::ripBackend().enumerate();
     std::unordered_set<uint32_t> after;
     for (const auto& p : now) after.insert(p.pid);
+    if (!g_resultsPids.empty()) {
+        g_resultsPids.erase(std::remove_if(g_resultsPids.begin(), g_resultsPids.end(),
+                                           [&](uint32_t p) { return !after.count(p); }), g_resultsPids.end());
+        if (g_resultsPids.empty()) {
+            clearResults();
+            g_statusFull = L"The scanned processes exited; results cleared.";
+            SetWindowTextW(g_status, g_statusFull.c_str());
+        }
+    }
     if (g_resultsPid && !after.count(g_resultsPid)) {
         clearResults();
         g_statusFull = L"The scanned process exited; results cleared.";
@@ -1147,6 +1188,7 @@ ur::Options gatherOptions() {
     o.utf16 = isChecked(g_utf16);
     o.base64 = isChecked(g_b64);
     o.hex = isChecked(g_hex);
+    o.escaped = isChecked(g_esc);
     o.mode = isChecked(g_modeRegex) ? ur::Mode::Regex : ur::Mode::Urls;
     o.dropCrap = isChecked(g_crap);
     if (o.mode == ur::Mode::Regex) {
@@ -1183,7 +1225,7 @@ void clearResults() {
     g_lastResults.clear();
     g_viewResults.clear();
     g_pageResults.clear(); g_page = 0;
-    g_resultsPid = 0;
+    g_resultsPid = 0; g_resultsPids.clear();
     ListView_DeleteAllItems(g_results);
     ListView_RemoveAllGroups(g_results);
     SetWindowTextW(g_filter, L"");
@@ -1211,6 +1253,7 @@ void enableResultActions(bool on) {
     for (HWND h : {g_copy, g_save, g_editor, g_clear}) { EnableWindow(h, on); InvalidateRect(h, nullptr, TRUE); }
 }
 
+int g_srcWant = 0;   /* widest source on the page, so region labels stay readable */
 void populateResults(const std::vector<ur::Group>& groups) {
     const auto total = ur::countFindings(groups);
     const auto pages = std::max<std::size_t>(1, (total + kPageSize - 1) / kPageSize);
@@ -1232,6 +1275,10 @@ void populateResults(const std::vector<ur::Group>& groups) {
     ListView_DeleteAllItems(g_results);
     ListView_RemoveAllGroups(g_results);
     ListView_EnableGroupView(g_results, TRUE);
+    HDC measure = GetDC(g_results);
+    HFONT oldFont = (HFONT)SelectObject(measure, g_fontMono);
+    std::unordered_set<std::string> measured;
+    g_srcWant = 0;
     int item = 0, gid = 0;
     for (const auto& g : g_pageResults) {
         /* empty default header: we owner-paint name + count in resultsSub, so the
@@ -1255,6 +1302,10 @@ void populateResults(const std::vector<ur::Group>& groups) {
             ListView_SetItemText(g_results, idx, 1, enc.data());
             std::wstring src = widen(f.source);
             ListView_SetItemText(g_results, idx, 2, src.data());
+            if (measured.insert(f.source).second) {
+                SIZE sz{}; GetTextExtentPoint32W(measure, src.c_str(), (int)src.size(), &sz);
+                g_srcWant = std::max(g_srcWant, (int)sz.cx);
+            }
             if (f.hasOffset) {
                 wchar_t addr[32];
                 _snwprintf_s(addr, _TRUNCATE, L"0x%llX", (unsigned long long)f.offset);
@@ -1264,6 +1315,8 @@ void populateResults(const std::vector<ur::Group>& groups) {
         }
         ++gid;
     }
+    SelectObject(measure, oldFont);
+    ReleaseDC(g_results, measure);
     fitColumns();
 }
 
@@ -1274,7 +1327,10 @@ void applyResultFilter() {
     std::string query = lower(narrow(q));
     g_viewResults.clear();
     const auto& visible = isChecked(g_newOnly) && g_hasComparison ? g_newResults : g_lastResults;
-    for (const auto& g : visible) {
+    std::size_t hidden = 0;
+    const bool ignoring = isChecked(g_ignoreChip) && !g_ignore.empty();
+    const auto kept = ignoring ? ur::filterIgnored(visible, g_ignore, &hidden) : std::vector<ur::Group>{};
+    for (const auto& g : ignoring ? kept : visible) {
         if (query.empty() || lower(g.name).find(query) != std::string::npos) { g_viewResults.push_back(g); continue; }
         ur::Group hit;
         hit.name = g.name;
@@ -1287,11 +1343,15 @@ void applyResultFilter() {
     }
     populateResults(g_viewResults);
     enableResultActions(!g_viewResults.empty());
-    if (query.empty() && !isChecked(g_newOnly)) { SetWindowTextW(g_status, g_statusFull.c_str()); return; }
-    wchar_t msg[128];
+    if (query.empty() && !isChecked(g_newOnly) && !hidden) { SetWindowTextW(g_status, g_statusFull.c_str()); return; }
+    std::wstring why;
+    auto add = [&](const std::wstring& w) { why += (why.empty() ? L"" : L", ") + w; };
+    if (isChecked(g_newOnly)) add(L"new since previous complete scan");
+    if (!query.empty()) add(L"filtered");
+    if (hidden) add(std::to_wstring(hidden) + L" hidden by ignore list");
+    wchar_t msg[256];
     _snwprintf_s(msg, _TRUNCATE, L"%zu of %zu results   (%s)",
-                 ur::countFindings(g_viewResults), ur::countFindings(g_lastResults),
-                 isChecked(g_newOnly) ? L"new since previous complete scan" : L"filtered");
+                 ur::countFindings(g_viewResults), ur::countFindings(g_lastResults), why.c_str());
     SetWindowTextW(g_status, msg);
 }
 
@@ -1309,6 +1369,7 @@ void onDone(std::vector<ur::Group>* groups) {
     if (!g_hasComparison) setChecked(g_newOnly, false);
     EnableWindow(g_newOnly, g_hasComparison);
     g_resultsPid = (g_scanPid && !g_scanDenied) ? g_scanPid : 0;
+    g_resultsPids = g_scanDenied ? std::vector<uint32_t>{} : g_scanPids;
     wchar_t msg[256];
     _snwprintf_s(msg, _TRUNCATE, L"%zu results in %zu groups, sorted Z to A   (%.2f s)%s",
                  ur::countFindings(g_lastResults), g_lastResults.size(),
@@ -1319,6 +1380,11 @@ void onDone(std::vector<ur::Group>* groups) {
         g_statusFull = L"100.0% - " + g_statusFull;
     if (g_progress.skipped)
         g_statusFull += L" - " + std::to_wstring(g_progress.skipped.load()) + L" bytes unreadable/changed";
+    if (!g_scanPids.empty()) {
+        g_statusFull += L" - " + std::to_wstring(g_scanPids.size()) + L" processes";
+        if (g_scanTargetsDenied && !g_scanDenied)
+            g_statusFull += L", " + std::to_wstring(g_scanTargetsDenied.load()) + L" could not be opened";
+    }
     if (g_hasComparison) g_statusFull += L" - " + std::to_wstring(ur::countFindings(g_liveDelta.added)) +
         L" added, " + std::to_wstring(ur::countFindings(g_liveDelta.removed)) +
         L" removed, " + std::to_wstring(ur::countFindings(g_liveDelta.unchanged)) + L" unchanged";
@@ -1369,11 +1435,16 @@ void doScan() {
     }
 
     uint32_t pid = 0;
+    std::string procName;
+    std::vector<uint32_t> pids;
     std::vector<std::filesystem::path> paths = g_chosenPaths;
     if (paths.empty()) {
         int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
-        if (sel >= 0 && sel < (int)g_procsView.size()) pid = g_procsView[sel].pid;
+        if (sel >= 0 && sel < (int)g_procsView.size()) { pid = g_procsView[sel].pid; procName = g_procsView[sel].name; }
     }
+    if (pid && isChecked(g_allInst))
+        for (const auto& p : g_procsAll) if (_stricmp(p.name.c_str(), procName.c_str()) == 0) pids.push_back(p.pid);
+    if (pids.size() < 2) pids.clear();
     if (!pid && paths.empty()) {
         MessageBoxW(g_main, L"Choose a process, or drop files on the window.", L"StringRipper", MB_ICONINFORMATION);
         return;
@@ -1381,7 +1452,7 @@ void doScan() {
 
     g_cancelFlag = false;
     g_scanGate.setPaused(false);
-    std::string source = "pid:" + std::to_string(pid);
+    std::string source = pids.empty() ? "pid:" + std::to_string(pid) : "name:" + lower(procName);
     if (!paths.empty()) {
         std::vector<std::string> names;
         for (const auto& p : paths)
@@ -1391,7 +1462,8 @@ void doScan() {
         for (const auto& n : names) source += std::to_string(n.size()) + ":" + n;
     }
     g_scanContext = ur::comparisonContext(source, o) + ur::selectionContext(g_fileSelection);
-    g_scanPid = pid;
+    g_scanPid = pids.empty() ? pid : 0;
+    g_scanPids = pids; g_scanTargetsDenied = 0;
     g_progress.reset();
     g_scanError.clear();
     setScanningUi(true);
@@ -1400,7 +1472,7 @@ void doScan() {
     SetTimer(g_main, TIMER_PROGRESS, 120, nullptr);
 
     const auto selection = g_fileSelection;
-    g_scanThread = std::thread([detector, pid, paths, selection]() {
+    g_scanThread = std::thread([detector, pid, pids, paths, selection]() {
         auto* result = new std::vector<ur::Group>();
         bool denied = false, needsElev = false, fdenied = false;
         auto t0 = std::chrono::steady_clock::now();
@@ -1409,7 +1481,13 @@ void doScan() {
             auto pause = [cancel] { g_scanGate.wait(cancel); };
             ur::DriverLimits limits;
             limits.rangeStart = selection.rangeStart; limits.rangeEnd = selection.rangeEnd;
-            if (pid) *result = ur::scanProcess(*detector, pid, cancel, denied, needsElev, &g_progress, limits, pause);
+            if (!pids.empty()) {
+                auto scan = ur::scanProcesses(*detector, pids, true, cancel, &g_progress, limits, pause);
+                *result = std::move(scan.groups);
+                g_scanTargetsDenied = scan.denied;
+                denied = scan.opened == 0; needsElev = scan.needsElevation;
+            }
+            else if (pid) *result = ur::scanProcess(*detector, pid, cancel, denied, needsElev, &g_progress, limits, pause);
             else *result = ur::scanPaths(*detector, paths, &fdenied, &g_progress, cancel, selection, pause);
         } catch (const std::exception& e) { g_scanError = e.what(); }
         catch (...) { g_scanError = "Unknown error"; }
@@ -1442,6 +1520,75 @@ std::filesystem::path appDataDir() {
     return dir;
 }
 std::filesystem::path workspaceDatabase() { return appDataDir() / L"workspace.sqlite"; }
+
+void loadIgnoreRules() {
+    try { ur::SessionStore db(workspaceDatabase()); g_ignoreLines = db.ignoreRules(); }
+    catch (const std::exception&) { g_ignoreLines.clear(); }
+    g_ignore = ur::IgnoreRules::parse(g_ignoreLines);
+}
+void saveIgnoreRules() {
+    try { ur::SessionStore db(workspaceDatabase()); db.setIgnoreRules(g_ignoreLines); }
+    catch (const std::exception& e) { MessageBoxW(g_main, widen(e.what()).c_str(), L"Ignore list", MB_ICONERROR); }
+    g_ignore = ur::IgnoreRules::parse(g_ignoreLines);
+    applyResultFilter();
+}
+
+enum : int { IG_TEXT = 6300, IG_SAVE, IG_CANCEL };
+HWND g_ig = nullptr, g_igText;
+LRESULT CALLBACK IgnoreProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_CREATE: {
+        darkTitle(h);
+        peCtl(h, L"STATIC", L"One rule per line. microsoft.com hides that host and its subdomains,", 0, 0, 16, 12, 560, 20);
+        peCtl(h, L"STATIC", L"*telemetry* hides values matching the pattern, =value hides exactly that value.", 0, 0, 16, 32, 560, 20);
+        std::string text;
+        for (const auto& line : g_ignoreLines) text += line + "\r\n";
+        g_igText = peCtl(h, L"EDIT", widen(text).c_str(), IG_TEXT,
+            ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_BORDER | WS_VSCROLL, 16, 62, 560, 296);
+        peCtl(h, L"BUTTON", L"Save", IG_SAVE, BS_DEFPUSHBUTTON, 364, 372, 102, 30);
+        peCtl(h, L"BUTTON", L"Cancel", IG_CANCEL, BS_PUSHBUTTON, 474, 372, 102, 30);
+        return 0;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == IG_SAVE) {
+            std::istringstream in(narrow(controlText(g_igText).c_str()));
+            g_ignoreLines.clear();
+            for (std::string line; std::getline(in, line);) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.find_first_not_of(" \t") != std::string::npos) g_ignoreLines.push_back(line);
+            }
+            saveIgnoreRules();
+            DestroyWindow(h);
+            return 0;
+        }
+        if (LOWORD(wp) == IG_CANCEL || LOWORD(wp) == IDCANCEL) { DestroyWindow(h); return 0; }
+        break;
+    case WM_CTLCOLORSTATIC: case WM_CTLCOLORBTN: {
+        HDC dc = (HDC)wp; SetTextColor(dc, kText); SetBkColor(dc, kBg); return (LRESULT)g_bgBrush;
+    }
+    case WM_CTLCOLOREDIT: {
+        HDC dc = (HDC)wp; SetTextColor(dc, kText); SetBkColor(dc, kBg2); return (LRESULT)g_bg2Brush;
+    }
+    case WM_ERASEBKGND: { RECT r; GetClientRect(h, &r); FillRect((HDC)wp, &r, g_bgBrush); return 1; }
+    case WM_CLOSE: DestroyWindow(h); return 0;
+    case WM_DESTROY: g_ig = nullptr; EnableWindow(g_main, TRUE); SetForegroundWindow(g_main); return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+void showIgnoreEditor() {
+    if (g_ig) { SetForegroundWindow(g_ig); return; }
+    WNDCLASSEXW wc{sizeof(wc)};
+    wc.lpfnWndProc = IgnoreProc; wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hbrBackground = g_bgBrush; wc.lpszClassName = L"StringRipperIgnoreList";
+    RegisterClassExW(&wc);
+    RECT r{0, 0, S(592), S(416)};
+    AdjustWindowRectEx(&r, WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
+    EnableWindow(g_main, FALSE);
+    g_ig = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Ignore list", WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, g_main, nullptr, wc.hInstance, nullptr);
+    if (!g_ig) { EnableWindow(g_main, TRUE); return; }
+    ShowWindow(g_ig, SW_SHOW); UpdateWindow(g_ig);
+}
 void wsError(HWND h, const std::exception& e) {
     SetWindowTextW(g_wsStatus, widen(e.what()).c_str());
     MessageBoxW(h, widen(e.what()).c_str(), L"Workspace", MB_ICONERROR);
@@ -1480,7 +1627,7 @@ void wsApplyOptions(const ur::Options& o) {
     setChecked(g_modeUrl, o.mode == ur::Mode::Urls);
     setChecked(g_modeRegex, o.mode == ur::Mode::Regex);
     setChecked(g_ascii, o.ascii); setChecked(g_utf16, o.utf16);
-    setChecked(g_b64, o.base64); setChecked(g_hex, o.hex);
+    setChecked(g_b64, o.base64); setChecked(g_hex, o.hex); setChecked(g_esc, o.escaped);
     auto has = [&](const char* p) { return std::find(o.presets.begin(), o.presets.end(), p) != o.presets.end(); };
     setChecked(g_pEmail, has("email")); setChecked(g_pIpv4, has("ipv4"));
     setChecked(g_pIpv6, has("ipv6")); setChecked(g_pGuid, has("guid"));
@@ -1532,6 +1679,7 @@ LRESULT CALLBACK WorkspaceProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 auto name = narrow(controlText(g_wsName).c_str());
                 if (name.empty()) throw std::runtime_error("Enter a session name");
                 std::string source = g_resultsPid ? "pid " + std::to_string(g_resultsPid) : "files";
+                if (!g_resultsPids.empty()) { source = "pids"; for (uint32_t p : g_resultsPids) source += " " + std::to_string(p); }
                 ur::SessionStore db(workspaceDatabase());
                 db.saveSession({0, name, source, "", g_lastResults}); wsRefresh();
             } else if (id == WS_OPEN_SESSION) {
@@ -1540,7 +1688,7 @@ LRESULT CALLBACK WorkspaceProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 ur::SessionStore db(workspaceDatabase());
                 auto session = db.loadSession(g_wsIndex[selected[0]].id);
                 g_lastResults = std::move(session.groups);
-                g_resultsPid = 0;
+                g_resultsPid = 0; g_resultsPids.clear();
                 g_comparison.clear(); g_hasComparison = false; g_newResults.clear();
                 setChecked(g_newOnly, false); EnableWindow(g_newOnly, FALSE);
                 g_statusFull = L"Opened session: " + widen(session.name);
@@ -1882,6 +2030,15 @@ void showOffsetInspector(std::wstring text) {
     if (!g_inspector) { EnableWindow(g_main, TRUE); return; }
     ShowWindow(g_inspector, SW_SHOW); UpdateWindow(g_inspector);
 }
+/* a process finding's pid: "(pid N)" in its source when several were scanned,
+   and only while that process is still part of the shown results */
+uint32_t findingPid(const ur::Finding& f) {
+    auto at = f.source.find(" (pid ");
+    if (at == std::string::npos) return g_resultsPid;
+    const auto pid = uint32_t(std::strtoul(f.source.c_str() + at + 6, nullptr, 10));
+    return std::find(g_resultsPids.begin(), g_resultsPids.end(), pid) != g_resultsPids.end() ? pid : 0;
+}
+
 void inspectOffset(const ur::Finding& f, bool file) {
     if (!f.hasOffset) return;
     constexpr std::size_t kPreview = 256;
@@ -1895,9 +2052,9 @@ void inspectOffset(const ur::Finding& f, bool file) {
             input.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
             got = static_cast<std::size_t>(input.gcount());
         }
-    } else if (g_resultsPid) {
+    } else if (uint32_t pid = findingPid(f)) {
         fxchain::RipStats stats; fxchain::RipTargetInfo info;
-        fxchain::ripBackend().withReader(g_resultsPid, stats, info, [&](fxchain::IMemoryReader& reader) {
+        fxchain::ripBackend().withReader(pid, stats, info, [&](fxchain::IMemoryReader& reader) {
             auto result = reader.read(start, bytes.data(), bytes.size());
             got = result.bytesRead;
         });
@@ -1931,9 +2088,15 @@ void showFindingMenu(const ur::Finding& f) {
     AppendMenuW(menu, MF_STRING, 1, L"Details and context");
     std::error_code ec;
     bool file = std::filesystem::is_regular_file(std::filesystem::u8path(f.source), ec);
+    const uint32_t pid = file ? 0 : findingPid(f);
+    const std::string process = pid ? fxchain::ripBackend().processName(pid) : std::string{};
     if (file) AppendMenuW(menu, MF_STRING, 2, L"Open source file");
-    if (f.hasOffset && (file || g_resultsPid)) AppendMenuW(menu, MF_STRING, 4, L"Inspect bytes at offset");
-    AppendMenuW(menu, MF_STRING, 3, L"Favorite source");
+    if (f.hasOffset && (file || pid)) AppendMenuW(menu, MF_STRING, 4, L"Inspect bytes at offset");
+    AppendMenuW(menu, MF_STRING, 3, process.empty() ? L"Favorite source" : L"Favorite process");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    if (g_lastMode == ur::Mode::Urls) AppendMenuW(menu, MF_STRING, 5, (L"Ignore " + widen(f.group)).c_str());
+    AppendMenuW(menu, MF_STRING, 6, L"Ignore this value");
+    AppendMenuW(menu, MF_STRING, 7, L"Edit ignore list...");
     POINT p; GetCursorPos(&p);
     int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, g_main, nullptr);
     DestroyMenu(menu);
@@ -1941,10 +2104,19 @@ void showFindingMenu(const ur::Finding& f) {
     else if (chosen == 2 && file) ShellExecuteW(g_main, L"open", std::filesystem::u8path(f.source).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     else if (chosen == 4) inspectOffset(f, file);
     else if (chosen == 3) {
-        try { ur::SessionStore db(workspaceDatabase()); db.setFavorite("source", f.source, true);
-              SetWindowTextW(g_status, L"Source added to favorites"); }
+        try { ur::SessionStore db(workspaceDatabase());
+              if (!process.empty()) db.setFavorite("process", process, true);
+              else db.setFavorite("source", f.source, true);
+              SetWindowTextW(g_status, process.empty() ? L"Source added to favorites" : L"Process added to favorites"); }
         catch (const std::exception& e) { MessageBoxW(g_main, widen(e.what()).c_str(), L"Favorite", MB_ICONERROR); }
     }
+    else if (chosen == 5 || chosen == 6) {
+        const std::string rule = chosen == 5 ? f.group : "=" + f.value;
+        if (std::find(g_ignoreLines.begin(), g_ignoreLines.end(), rule) == g_ignoreLines.end()) g_ignoreLines.push_back(rule);
+        setChecked(g_ignoreChip, true);
+        saveIgnoreRules();
+    }
+    else if (chosen == 7) showIgnoreEditor();
 }
 
 void copySelected() {
@@ -2040,7 +2212,9 @@ void layout(int cw, int ch) {
     MoveWindow(g_file, right - fw - setW - sp, y, fw, rh, TRUE);
     MoveWindow(g_settingsButton, right - setW, y, setW, rh, TRUE);
     y += rh + S(5);
-    MoveWindow(g_source, m + S(6), y + S(4), cw - m * 2 - S(12), S(360), TRUE);   // 360 = dropdown height
+    int aiw = textW(g_allInst, g_font) + S(24);
+    MoveWindow(g_allInst, right - aiw, y, aiw, rh, TRUE);
+    MoveWindow(g_source, m + S(6), y + S(4), cw - m * 2 - S(12) - aiw - sp, S(360), TRUE);   // 360 = dropdown height
     { RECT cr2; GetWindowRect(g_source, &cr2); MapWindowPoints(nullptr, g_main, (POINT*)&cr2, 2);
       InflateRect(&cr2, S(6), S(4)); g_fields[1] = cr2; }
     y += rh + hg;
@@ -2073,7 +2247,7 @@ void layout(int cw, int ch) {
 
     // DECODE
     MoveWindow(g_secDecode, m, y, S(200), hh, TRUE); y += hh + hg;
-    flow({g_ascii, g_utf16, g_b64, g_hex}, m, y, S(24));
+    flow({g_ascii, g_utf16, g_b64, g_hex, g_esc}, m, y, S(24));
     y += rh + gap;
 
     // scan bar
@@ -2088,12 +2262,14 @@ void layout(int cw, int ch) {
     MoveWindow(g_secResults, m, y + S(6), sw, hh, TRUE);
     g_fields[3] = { m + sw + sp, y, right, y + rh };
     int nw = textW(g_newOnly, g_font) + S(26);
+    int iw = textW(g_ignoreChip, g_font) + S(26);
     int ww = textW(g_workspace, g_font) + S(26);
     int dw = textW(g_dashboard, g_font) + S(26);
     MoveWindow(g_newOnly, right - nw, y, nw, rh, TRUE);
-    MoveWindow(g_workspace, right - nw - sp - ww, y, ww, rh, TRUE);
-    MoveWindow(g_dashboard, right - nw - sp - ww - sp - dw, y, dw, rh, TRUE);
-    g_fields[3].right = right - nw - sp - ww - sp - dw - sp;
+    MoveWindow(g_ignoreChip, right - nw - sp - iw, y, iw, rh, TRUE);
+    MoveWindow(g_workspace, right - nw - sp - iw - sp - ww, y, ww, rh, TRUE);
+    MoveWindow(g_dashboard, right - nw - sp - iw - sp - ww - sp - dw, y, dw, rh, TRUE);
+    g_fields[3].right = right - nw - sp - iw - sp - ww - sp - dw - sp;
     MoveWindow(g_filter, m + sw + sp + S(6), y + S(4),
         g_fields[3].right - m - sw - sp - S(12), rh - S(8), TRUE);
     y += rh + hg;
@@ -2116,7 +2292,9 @@ void layout(int cw, int ch) {
 
 void fitColumns() {
     RECT lc; GetClientRect(g_results, &lc);
-    int encW = S(90), srcW = S(220), offW = S(115), valW = lc.right - encW - srcW - offW;
+    int encW = S(90), offW = S(115);
+    int srcW = std::clamp(g_srcWant + S(20), S(220), std::max(S(220), int(lc.right) * 2 / 5));
+    int valW = lc.right - encW - srcW - offW;
     if (valW < S(160)) valW = S(160);
     ListView_SetColumnWidth(g_results, 0, valW);
     ListView_SetColumnWidth(g_results, 1, encW);
@@ -2258,6 +2436,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_refresh = mkPush(hwnd, L"Refresh", ID_REFRESH);
         g_file = mkPush(hwnd, L"File...", ID_FILE);
         g_settingsButton = mkPush(hwnd, L"Scan settings...", ID_SCAN_SETTINGS);
+        g_allInst = mkChip(hwnd, L"All instances", ID_ALL_INSTANCES);
+        setChecked(g_allInst, false);
         g_srcInfo = mkStatic(hwnd, L"Drop files or folders on the window, or scan the selected process.");
 
         g_secFind = mkSection(hwnd, L"WHAT TO FIND");
@@ -2289,7 +2469,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_utf16 = mkChip(hwnd, L"UTF-16", ID_ENC_UTF16);
         g_b64 = mkChip(hwnd, L"Base64", ID_ENC_B64);
         g_hex = mkChip(hwnd, L"Hex", ID_ENC_HEX);
-        for (HWND h : {g_ascii, g_utf16, g_b64, g_hex}) setChecked(h, true);
+        g_esc = mkChip(hwnd, L"Escaped", ID_ENC_ESC);
+        for (HWND h : {g_ascii, g_utf16, g_b64, g_hex, g_esc}) setChecked(h, true);
 
         g_scan = mkPush(hwnd, L"Scan", ID_SCAN);
         g_pause = mkPush(hwnd, L"Pause", ID_PAUSE);
@@ -2306,6 +2487,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)ID_FILTER, nullptr, nullptr);
         SendMessageW(g_filter, EM_SETCUEBANNER, TRUE, (LPARAM)L"Filter results...");
         g_newOnly = mkChip(hwnd, L"New only", ID_NEW_ONLY);
+        g_ignoreChip = mkChip(hwnd, L"Ignore list", ID_IGNORE);
+        setChecked(g_ignoreChip, true);
         g_workspace = mkPush(hwnd, L"Workspace...", ID_WORKSPACE);
         g_dashboard = mkPush(hwnd, L"Dashboard", ID_DASHBOARD);
         setChecked(g_newOnly, false); EnableWindow(g_newOnly, FALSE);
@@ -2511,7 +2694,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_PAGE_NEXT: ++g_page; populateResults(g_viewResults); break;
         case ID_NEW_ONLY:
             setChecked(g_newOnly, !isChecked(g_newOnly)); applyResultFilter(); break;
-        case ID_ENC_ASCII: case ID_ENC_UTF16: case ID_ENC_B64: case ID_ENC_HEX:
+        case ID_ALL_INSTANCES: setChecked(g_allInst, !isChecked(g_allInst)); break;
+        case ID_IGNORE: setChecked(g_ignoreChip, !isChecked(g_ignoreChip)); applyResultFilter(); break;
+        case ID_ENC_ASCII: case ID_ENC_UTF16: case ID_ENC_B64: case ID_ENC_HEX: case ID_ENC_ESC:
         case ID_P_EMAIL: case ID_P_IPV4: case ID_P_IPV6:
         case ID_P_GUID: case ID_P_APIKEY: case ID_P_PATH: case ID_P_DL: case ID_CRAP: {
             HWND c = (HWND)lp;
@@ -2708,6 +2893,7 @@ int runGui(HINSTANCE hInst) {
     /* auto-update: clear a leftover ".old" from a prior self-replace, then, once
        the user has answered the first-run consent, check GitHub in the
        background. Presets and workspace are never touched by an update. */
+    loadIgnoreRules();
     ur::cleanupSelfReplace();
     g_updatePrefs.load(updatePrefsPath());
     if (!g_updatePrefs.asked) {

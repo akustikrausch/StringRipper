@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scan_core.hpp"
+#include <cctype>
 #include <cstdio>
 #include <unordered_map>
 #include <map>
@@ -147,7 +148,7 @@ inline std::string comparisonContext(const std::string& source, const Options& o
     add(source); add(o.customRegex); add(o.customLabel);
     for (const auto& [label, pattern] : o.extraPatterns) { add(label); add(pattern); }
     add(std::to_string(static_cast<int>(o.mode)));
-    for (bool b : {o.ascii, o.utf16, o.base64, o.hex, o.customWholeWord, o.caseInsensitive, o.dropCrap})
+    for (bool b : {o.ascii, o.utf16, o.base64, o.hex, o.escaped, o.customWholeWord, o.caseInsensitive, o.dropCrap})
         add(b ? "1" : "0");
     add(std::to_string(o.minRun)); add(std::to_string(o.maxCandidate));
     add(std::to_string(o.presets.size()));
@@ -155,6 +156,75 @@ inline std::string comparisonContext(const std::string& source, const Options& o
     add(std::to_string(o.schemes.size()));
     for (const auto& s : o.schemes) add(s);
     return key;
+}
+
+/* ignore list, one rule per line, case-insensitive:
+     microsoft.com   that group and every group ending in .microsoft.com
+                     (URL hosts; a regex pattern label matches by name)
+     *telemetry*     values matching the glob, * and ?
+     =value          exactly this value
+   blank lines and lines starting with # are skipped */
+struct IgnoreRules {
+    std::vector<std::string> groups, globs, exact;
+
+    static std::string low(std::string s) {
+        for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    }
+    static IgnoreRules parse(const std::vector<std::string>& lines) {
+        IgnoreRules r;
+        for (const auto& line : lines) {
+            std::size_t a = line.find_first_not_of(" \t\r\n"), b = line.find_last_not_of(" \t\r\n");
+            if (a == std::string::npos || line[a] == '#') continue;
+            std::string rule = low(line.substr(a, b - a + 1));
+            if (rule[0] == '=') { if (rule.size() > 1) r.exact.push_back(rule.substr(1)); }
+            else if (rule.find_first_of("*?") != std::string::npos) r.globs.push_back(rule);
+            else r.groups.push_back(rule);
+        }
+        return r;
+    }
+    bool empty() const { return groups.empty() && globs.empty() && exact.empty(); }
+    static bool glob(const std::string& p, const std::string& s) {
+        std::size_t i = 0, j = 0, star = std::string::npos, mark = 0;
+        while (j < s.size()) {
+            if (i < p.size() && (p[i] == '?' || p[i] == s[j])) { ++i; ++j; }
+            else if (i < p.size() && p[i] == '*') { star = i++; mark = j; }
+            else if (star != std::string::npos) { i = star + 1; j = ++mark; }
+            else return false;
+        }
+        while (i < p.size() && p[i] == '*') ++i;
+        return i == p.size();
+    }
+    bool hidesGroup(const std::string& name) const {
+        if (groups.empty()) return false;
+        const std::string g = low(name);
+        for (const auto& h : groups)
+            if (g == h || (g.size() > h.size() && g[g.size() - h.size() - 1] == '.' &&
+                           g.compare(g.size() - h.size(), h.size(), h) == 0)) return true;
+        return false;
+    }
+    bool hidesValue(const std::string& value) const {
+        if (globs.empty() && exact.empty()) return false;
+        const std::string v = low(value);
+        for (const auto& e : exact) if (v == e) return true;
+        for (const auto& p : globs) if (glob(p, v)) return true;
+        return false;
+    }
+};
+
+inline std::vector<Group> filterIgnored(const std::vector<Group>& groups, const IgnoreRules& rules,
+                                        std::size_t* hidden = nullptr) {
+    std::vector<Group> out;
+    std::size_t gone = 0;
+    for (const auto& g : groups) {
+        if (rules.hidesGroup(g.name)) { gone += g.items.size(); continue; }
+        Group keep{g.name, {}};
+        for (const auto& f : g.items)
+            if (rules.hidesValue(f.value)) ++gone; else keep.items.push_back(f);
+        if (!keep.items.empty()) out.push_back(std::move(keep));
+    }
+    if (hidden) *hidden = gone;
+    return out;
 }
 
 } // namespace ur

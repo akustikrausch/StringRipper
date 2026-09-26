@@ -33,6 +33,15 @@ int main() {
     require(parsed && parsed->sources == job.sources && parsed->files.exclude == "ignored" &&
             parsed->monitorSeconds == 5, "job roundtrip");
     require(!ur::parseJob("SRJOB2 invalid"), "invalid job rejection");
+    {
+        ur::ScanJob e = job; e.options.escaped = false;
+        auto back = ur::parseJob(ur::serializeJob(e));
+        require(back && !back->options.escaped, "job keeps escaped=off");
+        std::string legacy = ur::serializeJob(job);
+        legacy = legacy.substr(0, legacy.rfind("ESC "));
+        auto old = ur::parseJob(legacy);
+        require(old && old->options.escaped, "job written before 1.2.5 loads with escaped on");
+    }
 
     {
         ur::SessionStore db(root / "workspace.sqlite");
@@ -41,6 +50,10 @@ int main() {
         require(db.loadJob("Text files")->monitorSeconds == 5, "job load");
         db.setFavorite("source", root.string(), true);
         require(db.favorites("source").size() == 1, "favorite add");
+        db.setIgnoreRules({"microsoft.com", "*telemetry*", "=x"});
+        require(db.ignoreRules() == std::vector<std::string>{"microsoft.com", "*telemetry*", "=x"}, "ignore rules keep order");
+        db.setIgnoreRules({"only.example.com"});
+        require(db.ignoreRules() == std::vector<std::string>{"only.example.com"}, "ignore rules are replaced, not appended");
         db.setFavorite("source", root.string(), false);
         require(db.favorites("source").empty(), "favorite remove");
 

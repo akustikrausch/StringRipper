@@ -261,6 +261,108 @@ int main() {
         CHECK(ok, "named group still parses after the lookbehind fix");
     }
 
+    // umlauts: UTF-8, ANSI (cp1252) and UTF-16 keep the whole path, offsets stay exact
+    {
+        auto one = [](const std::vector<ur::Group>& g, const std::string& v) -> const ur::Finding* {
+            for (auto& x : g) for (auto& f : x.items) if (f.value == v) return &f;
+            return nullptr;
+        };
+        auto bytes = [](const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); };
+        ur::Options path; path.mode = ur::Mode::Regex; path.presets = {"filepath"};
+        ur::Options app; app.mode = ur::Mode::Regex; app.customRegex = "AppData";
+
+        auto g8 = run(path, bytes(std::string("\x01" "C:\\Users\\J\xC3\xBCrgen\\cfg.ini\x01")));
+        auto* f8 = one(g8, "C:\\Users\\J\xC3\xBCrgen\\cfg.ini");
+        CHECK(f8 && f8->offset == 1, "UTF-8 umlaut path kept whole, exact offset");
+
+        const std::string ansiPath = std::string("\x01" "C:\\Users\\J\xFCrgen\\AppData\\x.txt\x01");
+        auto ga = run(path, bytes(ansiPath));
+        CHECK(one(ga, "C:\\Users\\J\xC3\xBCrgen\\AppData\\x.txt"), "ANSI umlaut path kept whole, as UTF-8");
+        auto gaApp = run(app, bytes(ansiPath));
+        auto* fa = one(gaApp, "AppData");
+        CHECK(fa && fa->offset == ansiPath.find("AppData"), "offset after an ANSI umlaut maps to the source byte");
+
+        auto gs = run(path, bytes(std::string("\x01" "C:\\Users\\\xC4rger\\Gr\xF6\xDF" "e.txt\x01")));
+        CHECK(one(gs, "C:\\Users\\\xC3\x84rger\\Gr\xC3\xB6\xC3\x9F" "e.txt"), "ANSI word start and two-letter cluster kept");
+
+        ur::Options word; word.mode = ur::Mode::Regex; word.customRegex = "[^ ]+";
+        auto gj = run(word, bytes(std::string("\x01\xE4\xF6\xFC\xE4 \xE9 1\xFC" "2 plain text\x01")));
+        bool glued = false;
+        for (auto& x : gj) for (auto& f : x.items) glued |= f.value.find('\xC3') != std::string::npos;
+        CHECK(!gj.empty() && !glued, "high bytes without letters around do not glue into the run");
+
+        std::vector<uint8_t> w;
+        const std::string wide = "C:\\Users\\J\xFCrgen\\AppData\\x.txt";
+        w.push_back(0); w.push_back(0);
+        for (unsigned char c : wide) { w.push_back(c); w.push_back(0); }
+        w.push_back(0); w.push_back(0);
+        auto gw = run(path, w);
+        auto* fw = one(gw, "C:\\Users\\J\xC3\xBCrgen\\AppData\\x.txt");
+        CHECK(fw && fw->enc == ur::Enc::Utf16 && fw->offset == 2, "UTF-16 umlaut path kept whole, exact offset");
+        auto gwApp = run(app, w);
+        auto* fwa = one(gwApp, "AppData");
+        CHECK(fwa && fwa->offset == 2 + 2 * wide.find("AppData"), "UTF-16 offset after an umlaut maps to the source unit");
+    }
+
+    // escaped URLs: JSON \/, percent, \u002F and \x2F; nothing twice
+    {
+        auto bytes = [](const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); };
+        auto only = [](const std::vector<ur::Group>& g, const std::string& v) {
+            std::size_t n = 0; const ur::Finding* hit = nullptr;
+            for (auto& x : g) for (auto& f : x.items) if (f.value == v) { ++n; hit = &f; }
+            return n == 1 ? hit : nullptr;
+        };
+        ur::Options o;
+        const std::string json = "\x01{\"u\":\"https:\\/\\/cdn.example.com\\/app.zip\"}\x01";
+        auto* fj = only(run(o, bytes(json)), "https://cdn.example.com/app.zip");
+        CHECK(fj && fj->enc == ur::Enc::Escaped && fj->offset == json.find("https"), "JSON-escaped URL found, exact offset");
+
+        const std::string pct = "\x01next=https%3A%2F%2Fcdn.example.com%2Fa.zip\x01";
+        auto* fp = only(run(o, bytes(pct)), "https://cdn.example.com/a.zip");
+        CHECK(fp && fp->offset == pct.find("https"), "percent-encoded URL found, exact offset");
+
+        CHECK(only(run(o, bytes("\x01https:\\u002F\\u002Fu.example.com\\u002Fx\x01")), "https://u.example.com/x"),
+              "\\u002F-escaped URL found");
+        CHECK(only(run(o, bytes("\x01https:\\x2F\\x2Fx.example.com\\x2Fy\x01")), "https://x.example.com/y"),
+              "\\x2F-escaped URL found");
+
+        auto plain = run(o, bytes("\x01https://p.example.com/my%20file.zip\x01"));
+        CHECK(ur::countFindings(plain) == 1, "plain URL with %20 in the path is not reported twice");
+
+        ur::Options off; off.escaped = false;
+        CHECK(!hasGroup(run(off, bytes(json)), "cdn.example.com"), "Escaped decoder off: JSON-escaped URL not found");
+
+        std::vector<uint8_t> w; const std::string wj = "https:\\/\\/w.example.com\\/z";
+        w.push_back(0); w.push_back(0);
+        for (unsigned char c : wj) { w.push_back(c); w.push_back(0); }
+        w.push_back(0); w.push_back(0);
+        auto* fw = only(run(o, w), "https://w.example.com/z");
+        CHECK(fw && fw->offset == 2, "JSON-escaped URL in UTF-16 found, exact offset");
+
+        ur::Options mail; mail.mode = ur::Mode::Regex; mail.presets = {"email"};
+        CHECK(only(run(mail, bytes("\x01to=user%40mail.example.com&x=1\x01")), "user@mail.example.com"),
+              "percent-encoded email found in regex mode");
+    }
+
+    // match context never ends inside a UTF-8 character
+    {
+        ur::Options o; o.mode = ur::Mode::Regex; o.customRegex = "TOKEN";
+        std::string s = "\x01";
+        for (int i = 0; i < 20; ++i) s += "\xC3\xA4";   // 40 bytes of ä before the hit
+        s += "TOKEN";
+        for (int i = 0; i < 20; ++i) s += "\xC3\xB6";
+        s += "\x01";
+        auto g = run(o, std::vector<uint8_t>(s.begin(), s.end()));
+        bool clean = !g.empty() && !g[0].items.empty();
+        if (clean) {
+            const auto& f = g[0].items[0];
+            for (const std::string* c : {&f.before, &f.after})
+                clean = clean && !c->empty() && (uint8_t((*c)[0]) & 0xC0) != 0x80 &&
+                        (c->size() % 2) == 0;
+        }
+        CHECK(clean, "context cut at 32 bytes keeps whole UTF-8 characters");
+    }
+
     std::printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", failures);
     return failures ? 1 : 0;
 }

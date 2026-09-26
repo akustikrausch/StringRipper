@@ -37,7 +37,8 @@ static void usage() {
         "  --scheme LIST    URL mode: only these schemes (e.g. http,https)\n"
         "  --icase          case-insensitive matching\n"
         "  --no-crap        URL mode: keep placeholder/namespace hosts too\n"
-        "  --no-ascii --no-utf16 --no-base64 --no-hex   turn off a decoder\n"
+        "  --no-ascii --no-utf16 --no-base64 --no-hex --no-escaped   turn off a decoder\n"
+        "  --ignore RULE    hide a host (and its subdomains), a *glob* or =exact value; repeatable\n"
         "  --out FILE       write results to FILE\n\n"
         "  --format TYPE    txt (default), csv, json or sqlite\n"
         "  --include GLOBS  include file patterns (comma-separated)\n"
@@ -69,6 +70,7 @@ int main(int argc, char** argv) {
     ur::FileSelection selection;
     std::string dbFile = "stringripper-sessions.sqlite", sessionName, jobName, runJob, favorite;
     bool listJobs = false, listFavorites = false;
+    std::vector<std::string> ignore;
     int64_t openSession = 0, compareA = 0, compareB = 0;
     bool help = argc < 2;
 
@@ -99,6 +101,8 @@ int main(int argc, char** argv) {
         else if (a == "--no-utf16") o.utf16 = false;
         else if (a == "--no-base64") o.base64 = false;
         else if (a == "--no-hex") o.hex = false;
+        else if (a == "--no-escaped") o.escaped = false;
+        else if (a == "--ignore") ignore.push_back(next());
         else if (a == "--out") outFile = next();
         else if (a == "--format") format = next();
         else if (a == "--include") selection.include = next();
@@ -165,6 +169,7 @@ int main(int argc, char** argv) {
 
     bool denied = false;
     auto groups = ur::scanPaths(*det, inputs, &denied, nullptr, {}, selection);
+    if (!ignore.empty()) groups = ur::filterIgnored(groups, ur::IgnoreRules::parse(ignore));
     if (denied) std::fprintf(stderr, "note: some sources could not be read\n");
 
     if (format == "sqlite" || !sessionName.empty()) {

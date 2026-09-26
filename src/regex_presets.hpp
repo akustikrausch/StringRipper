@@ -27,14 +27,14 @@ struct UserPreset {
     std::string pattern;
     std::string positiveExamples, negativeExamples; // one test case per line
     bool validated = false;
-    bool ascii = true, utf16 = true, hex = false, base64 = false;
+    bool ascii = true, utf16 = true, hex = false, base64 = false, escaped = true;
     bool custom = true, email = false, ipv4 = false, ipv6 = false;
     bool guid = false, apiKey = false, filepath = false, download = false;
 };
 
 inline Options presetOptions(const UserPreset& p) {
     Options o; o.mode = Mode::Regex;
-    o.ascii = p.ascii; o.utf16 = p.utf16; o.hex = p.hex; o.base64 = p.base64;
+    o.ascii = p.ascii; o.utf16 = p.utf16; o.hex = p.hex; o.base64 = p.base64; o.escaped = p.escaped;
     if (p.custom) o.customRegex = p.pattern;
     o.customLabel = p.name;
     if (p.email) o.presets.push_back("email");
@@ -45,18 +45,18 @@ inline Options presetOptions(const UserPreset& p) {
     if (p.filepath) o.presets.push_back("filepath");
     if (p.download) o.presets.push_back("fileurl");
     if (p.custom && p.pattern.empty()) throw RegexError("Custom regex is empty");
-    if (!p.ascii && !p.utf16 && !p.hex && !p.base64) throw RegexError("Select at least one decoder");
+    if (!p.ascii && !p.utf16 && !p.hex && !p.base64 && !p.escaped) throw RegexError("Select at least one decoder");
     return o;
 }
 
 inline Options profileOptions(const std::vector<UserPreset>& presets) {
     if (presets.empty()) throw RegexError("Profile has no presets");
     Options out; out.mode = Mode::Regex;
-    out.ascii = out.utf16 = out.hex = out.base64 = false;
+    out.ascii = out.utf16 = out.hex = out.base64 = out.escaped = false;
     for (const auto& p : presets) {
         auto item = presetOptions(p);
         out.ascii |= item.ascii; out.utf16 |= item.utf16;
-        out.hex |= item.hex; out.base64 |= item.base64;
+        out.hex |= item.hex; out.base64 |= item.base64; out.escaped |= item.escaped;
         for (const auto& builtin : item.presets)
             if (std::find(out.presets.begin(), out.presets.end(), builtin) == out.presets.end())
                 out.presets.push_back(builtin);
@@ -191,6 +191,7 @@ inline std::vector<UserPreset> parseUserPresets(const std::string& text, std::st
         else if (k == "UTF-16") p->utf16 = presetBool(v);
         else if (k == "HEX") p->hex = presetBool(v);
         else if (k == "BASE64") p->base64 = presetBool(v);
+        else if (k == "ESCAPED") p->escaped = presetBool(v);
         else if (k == "Custom") p->custom = presetBool(v);
         else if (k == "Email") p->email = presetBool(v);
         else if (k == "IPv4") p->ipv4 = presetBool(v);
@@ -215,7 +216,8 @@ inline std::string serializeUserPresets(const std::vector<UserPreset>& presets) 
         out += "Negative=" + presetEscape(p.negativeExamples) + "\n";
         out += "Validated=" + std::to_string(p.validated) + "\n\n";
         out += "ASCII=" + std::to_string(p.ascii) + "\nUTF-16=" + std::to_string(p.utf16);
-        out += "\nHEX=" + std::to_string(p.hex) + "\nBASE64=" + std::to_string(p.base64) + "\n\n";
+        out += "\nHEX=" + std::to_string(p.hex) + "\nBASE64=" + std::to_string(p.base64);
+        out += "\nESCAPED=" + std::to_string(p.escaped) + "\n\n";
         out += "Custom=" + std::to_string(p.custom) + "\nEmail=" + std::to_string(p.email);
         out += "\nIPv4=" + std::to_string(p.ipv4) + "\nIPv6=" + std::to_string(p.ipv6);
         out += "\nGUID=" + std::to_string(p.guid) + "\nAPIKey=" + std::to_string(p.apiKey);

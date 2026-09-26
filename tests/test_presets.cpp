@@ -23,6 +23,15 @@ int main() {
     if (b.name != a.name || b.description != a.description || b.pattern != a.pattern ||
         b.positiveExamples != a.positiveExamples || b.negativeExamples != a.negativeExamples) return 2;
     if (!b.validated || !b.ascii || b.utf16 || !b.custom || !b.email || !b.download) return 3;
+    {
+        ur::UserPreset e = a; e.escaped = false;
+        auto back = ur::parseUserPresets(ur::serializeUserPresets({e}), &err);
+        if (!err.empty() || back.size() != 1 || back[0].escaped) return 18;
+        auto legacy = ur::parseUserPresets("[Regex User Preset: Old]\nRegex=x+\nASCII=1\n", &err);
+        if (!err.empty() || legacy.size() != 1 || !legacy[0].escaped) return 19;
+        ur::UserPreset only = a; only.ascii = only.utf16 = only.hex = only.base64 = false; only.escaped = true;
+        try { if (!ur::presetOptions(only).escaped) return 20; } catch (const ur::RegexError&) { return 21; }
+    }
     auto report = ur::testPresetExamples(b);
     if (report.failed || report.passed != 4) return 16;
     ur::UserPreset second = a; second.name = "Other"; second.pattern = "Z[0-9]+";

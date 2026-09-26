@@ -164,17 +164,15 @@ private:
 };
 
 #ifdef SR_HAVE_RIPPER
-inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
-                               const std::string& sourceName, const DriverLimits& lim,
-                               const std::function<bool(uint64_t)>& progress = {}, ScanProgress* state = nullptr,
-                               const std::function<void()>& pause = {}) {
+/* the readable regions a scan of this reader will read, capped at lim.maxBytes */
+inline std::vector<fxchain::RipMemoryRegion> planRegions(fxchain::IMemoryReader& reader, const DriverLimits& lim,
+                                                         uint64_t& planned, const std::function<bool()>& cancelled = {}) {
     const uint64_t maxAddr = reader.maximumAddress();
     uint64_t addr = std::max(reader.minimumAddress(), lim.rangeStart);
     const uint64_t rangeEnd = lim.rangeEnd ? std::min(maxAddr, lim.rangeEnd) : maxAddr;
-    uint64_t total = 0;
     std::vector<fxchain::RipMemoryRegion> regions;
-    uint64_t planned = 0;
-    while (addr < rangeEnd && planned < lim.maxBytes && !pool.cancelled()) {
+    planned = 0;
+    while (addr < rangeEnd && planned < lim.maxBytes && !(cancelled && cancelled())) {
         fxchain::RipMemoryRegion r{};
         if (!reader.query(addr, r)) break;
         uint64_t next = r.base + r.size;
@@ -187,21 +185,44 @@ inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
         }
         addr = next;
     }
-    if (state) { state->total = planned; state->planning = false; }
+    return regions;
+}
+
+/* regionLabel names the span an address sits in ("heap", "xul.dll .rdata") and
+   pulls spanEnd in to where that name stops holding, so a region that merges
+   several image sections is read span by span, each under its own name.
+   keepTotal leaves state->total alone when several readers share one plan. */
+inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
+                               const std::string& sourceName, const DriverLimits& lim,
+                               const std::function<bool(uint64_t)>& progress = {}, ScanProgress* state = nullptr,
+                               const std::function<void()>& pause = {},
+                               const std::function<std::string(uint64_t, uint64_t&)>& regionLabel = {},
+                               bool keepTotal = false) {
+    uint64_t total = 0, planned = 0;
+    const auto regions = planRegions(reader, lim, planned, [&] { return pool.cancelled(); });
+    if (state && !keepTotal) { state->total = planned; state->planning = false; }
     std::vector<uint8_t> chunk(lim.window);
     for (const auto& region : regions) {
-        if (pool.cancelled()) break;
-        {
+        const uint64_t end = region.base + region.size;
+        for (uint64_t at = region.base; at < end && total < lim.maxBytes;) {
+            if (pool.cancelled()) return total;
+            uint64_t spanEnd = end;
+            std::string source = sourceName;
+            if (regionLabel) {
+                std::string l = regionLabel(at, spanEnd);
+                if (!l.empty()) source += " [" + l + "]";
+                if (spanEnd <= at || spanEnd > end) spanEnd = end;
+            }
             std::vector<uint8_t> tail;
-            uint64_t off = 0;
-            while (off < region.size && total < lim.maxBytes) {
+            uint64_t off = at;
+            while (off < spanEnd && total < lim.maxBytes) {
                 if (pause) pause();
                 if (pool.cancelled()) return total;
-                std::size_t want = static_cast<std::size_t>(
-                    std::min<uint64_t>(lim.window, region.size - off));
-                fxchain::RipReadResult r = reader.read(region.base + off, chunk.data(), want);
+                std::size_t want = static_cast<std::size_t>(std::min<uint64_t>(lim.window, spanEnd - off));
+                fxchain::RipReadResult r = reader.read(off, chunk.data(), want);
                 if (r.bytesRead == 0) {
-                    if (state) state->skipped += region.size - off;
+                    if (state) state->skipped += end - off;
+                    spanEnd = end;
                     break;
                 }
                 const auto prefix = tail.size();
@@ -212,11 +233,11 @@ inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
                 std::size_t keep = std::min<std::size_t>(lim.overlap, buf.size());
                 tail.assign(buf.end() - keep, buf.end());
                 total += r.bytesRead;
-                pool.submit(std::move(buf), sourceName, r.bytesRead,
-                            region.base + off - prefix, true);
+                pool.submit(std::move(buf), source, r.bytesRead, off - prefix, true);
                 if (progress && !progress(total)) return total;
                 off += r.bytesRead;
             }
+            at = spanEnd;
         }
     }
     return total;

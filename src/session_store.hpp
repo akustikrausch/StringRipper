@@ -22,6 +22,8 @@ public:
     std::optional<ScanJob> loadJob(const std::string& name) const;
     void setFavorite(const std::string& kind, const std::string& target, bool favorite);
     std::vector<std::string> favorites(const std::string& kind) const;
+    std::vector<std::string> ignoreRules() const;
+    void setIgnoreRules(const std::vector<std::string>& rules);
 
 private:
     sqlite3* db_ = nullptr;

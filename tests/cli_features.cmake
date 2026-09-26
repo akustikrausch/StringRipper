@@ -77,3 +77,20 @@ execute_process(COMMAND "${CLI}" --file "${WORK}/feature-input.txt"
 if(NOT rc EQUAL 0 OR NOT combined MATCHES "Support ticket IDs")
   message(FATAL_ERROR "Combined profile failed: ${rc} ${err}")
 endif()
+
+file(WRITE "${WORK}/escaped-input.txt" "cfg={\"u\":\"https:\\/\\/cdn.example.com\\/app.zip\"}\nplain https://keep.example.org/x\n")
+execute_process(COMMAND "${CLI}" --file "${WORK}/escaped-input.txt" --format json
+  RESULT_VARIABLE rc OUTPUT_VARIABLE output ERROR_VARIABLE err)
+if(NOT rc EQUAL 0 OR NOT output MATCHES "https://cdn.example.com/app.zip" OR NOT output MATCHES "\"Escaped\"")
+  message(FATAL_ERROR "JSON-escaped URL not found by the CLI: ${rc} ${err} ${output}")
+endif()
+execute_process(COMMAND "${CLI}" --no-escaped --file "${WORK}/escaped-input.txt" --format json
+  RESULT_VARIABLE rc OUTPUT_VARIABLE output)
+if(output MATCHES "cdn.example.com")
+  message(FATAL_ERROR "--no-escaped must turn the escaped decoder off")
+endif()
+execute_process(COMMAND "${CLI}" --ignore example.com --file "${WORK}/escaped-input.txt" --format json
+  RESULT_VARIABLE rc OUTPUT_VARIABLE output)
+if(output MATCHES "cdn.example.com" OR NOT output MATCHES "keep.example.org")
+  message(FATAL_ERROR "--ignore example.com must hide cdn.example.com but keep keep.example.org: ${output}")
+endif()
