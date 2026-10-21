@@ -12,10 +12,26 @@ namespace ur {
 inline std::string jsonString(const std::string& s) {
     std::string out = "\"";
     const char* hex = "0123456789abcdef";
-    for (unsigned char c : s) {
+    for (std::size_t i = 0; i < s.size();) {
+        const auto c = static_cast<unsigned char>(s[i]);
         if (c == '"' || c == '\\') { out += '\\'; out += char(c); }
         else if (c < 0x20) { out += "\\u00"; out += hex[c >> 4]; out += hex[c & 15]; }
-        else out += char(c);
+        else if (c < 0x80) out += char(c);
+        else {
+            std::size_t length = c >= 0xF0 && c <= 0xF4 ? 4 : c >= 0xE0 && c <= 0xEF ? 3 :
+                                 c >= 0xC2 && c <= 0xDF ? 2 : 0;
+            bool valid = length && i + length <= s.size();
+            if (valid) {
+                for (std::size_t j = 1; j < length; ++j)
+                    valid &= (static_cast<unsigned char>(s[i + j]) & 0xC0) == 0x80;
+                const auto second = static_cast<unsigned char>(s[i + 1]);
+                valid &= !(c == 0xE0 && second < 0xA0) && !(c == 0xED && second >= 0xA0) &&
+                         !(c == 0xF0 && second < 0x90) && !(c == 0xF4 && second >= 0x90);
+            }
+            if (valid) { out.append(s, i, length); i += length; continue; }
+            out += "\\u00"; out += hex[c >> 4]; out += hex[c & 15];
+        }
+        ++i;
     }
     return out + '"';
 }
@@ -24,7 +40,10 @@ inline std::string csvField(const std::string& s) {
     std::string out = "\"";
     if (!s.empty() && (s[0] == '=' || s[0] == '+' || s[0] == '-' || s[0] == '@' || s[0] == '\t'))
         out += '\'';
-    for (char c : s) { if (c == '"') out += '"'; out += c; }
+    for (char c : s) {
+        if (c == '\0') out += "\\0";
+        else { if (c == '"') out += '"'; out += c; }
+    }
     return out + '"';
 }
 
@@ -230,6 +249,9 @@ inline std::size_t resolveDownloadHosts(std::vector<Group>& groups) {
             f.value = pick->origin + path;
             ++resolved;
         }
+        std::sort(g.items.begin(), g.items.end(), [](const Finding& a, const Finding& b) {
+            return std::lexicographical_compare(b.value.begin(), b.value.end(), a.value.begin(), a.value.end());
+        });
     }
     return resolved;
 }

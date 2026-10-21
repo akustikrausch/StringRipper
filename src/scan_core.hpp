@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <regex>
 #include <string>
@@ -91,7 +92,7 @@ inline const std::vector<Preset>& builtinPresets() {
         {"guid",     "GUID",          R"(\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b)"},
         {"apikey",   "API key",       R"(\b(?:AKIA[0-9A-Z]{16}|gh[opusr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9\-]{10,}|sk_(?:live|test)_[A-Za-z0-9]{16,})\b)"},
         {"filepath", "File path",     R"((?:[A-Za-z]:\\|\\\\)[^\r\n"<>|?*\x00]{2,})"},
-        {"fileurl",  "Download URL",  R"([A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]{2,}\.(?:exe|msi|zip|7z|rar|gz|tgz|tar|bz2|xz|dmg|pkg|app|iso|deb|rpm|apk|cab|jar|whl|nupkg|vsix|appimage|bin|run)\b)"},
+        {"fileurl",  "Download URL",  R"((?:[A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]|[\xC3-\xC9][\x80-\xBF]){2,}\.(?:exe|msi|zip|7z|rar|gz|tgz|tar|bz2|xz|dmg|pkg|app|iso|deb|rpm|apk|cab|jar|whl|nupkg|vsix|appimage|bin|run)\b)"},
     };
     return p;
 }
@@ -195,6 +196,16 @@ inline std::size_t utf8Char(const uint8_t* d, std::size_t n, std::size_t i, uint
     if (c < lo || c < 0xA0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF) ||
         c == 0xFEFF || (c & 0xFFFE) == 0xFFFE) return 0;
     cp = c; return len;
+}
+
+/* a non-ASCII character inside a URL path: a valid UTF-8 letter or mark, not
+   the typographic punctuation that ends a URL in prose. 0 = the URL ends. */
+inline std::size_t urlTextChar(const std::string& s, std::size_t i) {
+    uint32_t cp = 0;
+    const std::size_t len = utf8Char(reinterpret_cast<const uint8_t*>(s.data()), s.size(), i, cp);
+    if (!len || cp < 0xC0 || cp == 0xD7 || cp == 0xF7 || (cp >= 0x2000 && cp <= 0x206F) ||
+        (cp >= 0x3000 && cp <= 0x303F) || (cp >= 0xFF00 && cp <= 0xFF20)) return 0;
+    return len;
 }
 
 inline bool isWordEdge(uint32_t c) {
@@ -448,7 +459,8 @@ inline bool unescape(const std::string& s, std::string& out,
 
 template <typename Pred, typename Dec>
 inline void decodeRuns(const std::string& s, std::size_t minRun, bool needEven,
-                       Pred isMember, Dec decode, std::vector<std::string>& out) {
+                       Pred isMember, Dec decode, std::vector<std::string>& out,
+                       std::vector<std::pair<std::size_t, std::size_t>>* spans = nullptr) {
     std::size_t i = 0;
     while (i < s.size()) {
         if (!isMember(s[i])) { ++i; continue; }
@@ -460,7 +472,10 @@ inline void decodeRuns(const std::string& s, std::size_t minRun, bool needEven,
             std::string dec = decode(run);
             std::size_t printable = 0;
             for (unsigned char c : dec) if (isPrintable(c)) ++printable;
-            if (dec.size() >= 4 && printable * 2 >= dec.size()) out.push_back(std::move(dec));
+            if (dec.size() >= 4 && printable * 2 >= dec.size()) {
+                out.push_back(std::move(dec));
+                if (spans) spans->emplace_back(i, j);
+            }
         }
         i = j;
     }
@@ -570,6 +585,7 @@ struct RunView {
     std::size_t stride = 1;
     const std::vector<uint32_t>* map = nullptr;
     const std::vector<uint8_t>* esc = nullptr;
+    bool cutHead = false, cutTail = false;
     uint64_t at(std::size_t pos) const { return base + (map ? (*map)[pos] : pos * stride); }
 };
 
@@ -670,9 +686,12 @@ public:
     }
 
     void scan(const uint8_t* data, std::size_t n, const std::string& source, Sink& sink,
-              uint64_t baseOffset = 0, bool knownOffset = false) const {
-        auto view = [&](std::size_t off, const std::vector<uint32_t>& m, std::size_t stride) {
-            return detail::RunView{baseOffset + off, knownOffset, stride, m.empty() ? nullptr : &m, nullptr};
+              uint64_t baseOffset = 0, bool knownOffset = false,
+              bool cutHead = false, bool cutTail = false) const {
+        auto view = [&](std::size_t off, const std::vector<uint32_t>& m, std::size_t stride, std::size_t len) {
+            const std::size_t end = off + (m.empty() ? len * stride : m.back() + stride);
+            return detail::RunView{baseOffset + off, knownOffset, stride, m.empty() ? nullptr : &m,
+                                   nullptr, cutHead && off == 0, cutTail && end == n};
         };
         std::vector<std::string> ascii;
         std::vector<std::size_t> asciiOffsets;
@@ -680,7 +699,7 @@ public:
         if (opt_.ascii || opt_.base64 || opt_.hex || opt_.escaped)
             detail::extractAscii(data, n, opt_.minRun, ascii, &asciiOffsets, &asciiMaps);
         for (std::size_t i = 0; i < ascii.size(); ++i) {
-            const detail::RunView v = view(asciiOffsets[i], asciiMaps[i], 1);
+            const detail::RunView v = view(asciiOffsets[i], asciiMaps[i], 1, ascii[i].size());
             if (opt_.ascii) match(ascii[i], Enc::Ascii, source, sink, v);
             if (opt_.escaped) matchEscaped(ascii[i], source, sink, v);
         }
@@ -689,39 +708,85 @@ public:
         std::vector<std::size_t> wideOffsets;
         std::vector<std::vector<uint32_t>> wideMaps;
         if (opt_.utf16) {
-            detail::extractUtf16(data, n, true, opt_.minRun, wide, &wideOffsets, &wideMaps);
-            detail::extractUtf16(data, n, false, opt_.minRun, wide, &wideOffsets, &wideMaps);
+            std::vector<bool> isLe;
+            for (std::size_t phase = 0; phase < 2 && phase < n; ++phase) {
+                for (bool le : {true, false}) {
+                    const std::size_t first = wideOffsets.size();
+                    detail::extractUtf16(data + phase, n - phase, le, opt_.minRun,
+                                         wide, &wideOffsets, &wideMaps);
+                    for (std::size_t i = first; i < wideOffsets.size(); ++i) wideOffsets[i] += phase;
+                    isLe.resize(wideOffsets.size(), le);
+                }
+            }
+            /* LE text after a zero byte also reads as BE one byte earlier, and BE
+               text before a zero byte as LE one byte later: same string twice.
+               Keep the LE reading. */
+            std::unordered_map<std::size_t, std::size_t> leAt;
+            for (std::size_t i = 0; i < wide.size(); ++i) if (isLe[i]) leAt.emplace(wideOffsets[i], i);
+            std::vector<bool> twin(wide.size());
             for (std::size_t i = 0; i < wide.size(); ++i) {
-                const detail::RunView v = view(wideOffsets[i], wideMaps[i], 2);
+                if (isLe[i]) continue;
+                for (std::size_t o : {wideOffsets[i] + 1, wideOffsets[i] - 1}) {
+                    auto it = leAt.find(o);
+                    if (it != leAt.end() && wide[it->second] == wide[i]) twin[i] = true;
+                }
+            }
+            for (std::size_t i = 0; i < wide.size(); ++i) {
+                if (twin[i]) continue;
+                const detail::RunView v = view(wideOffsets[i], wideMaps[i], 2, wide[i].size());
                 match(wide[i], Enc::Utf16, source, sink, v);
                 if (opt_.escaped) matchEscaped(wide[i], source, sink, v);
             }
         }
 
         if (opt_.base64 || opt_.hex) {
-            auto decodeAndScan = [&](const std::string& sp) {
+            auto decodeAndScan = [&](const std::string& sp, const detail::RunView& rv) {
                 if (opt_.base64) {
                     std::vector<std::string> dec;
-                    detail::decodeRuns(sp, 16, false, detail::isBase64Char, detail::decodeBase64, dec);
-                    for (auto& d : dec) scanDecoded(d, Enc::Base64, source, sink);
+                    std::vector<std::pair<std::size_t, std::size_t>> spans;
+                    detail::decodeRuns(sp, 16, false, detail::isBase64Char, detail::decodeBase64, dec, &spans);
+                    for (std::size_t i = 0; i < dec.size(); ++i)
+                        scanDecoded(dec[i], Enc::Base64, source, sink,
+                                    rv.cutHead && spans[i].first == 0, rv.cutTail && spans[i].second == sp.size());
                 }
                 if (opt_.hex) {
                     std::vector<std::string> dec;
-                    detail::decodeRuns(sp, 16, true, detail::isHexChar, detail::decodeHex, dec);
-                    for (auto& d : dec) scanDecoded(d, Enc::Hex, source, sink);
+                    std::vector<std::pair<std::size_t, std::size_t>> spans;
+                    detail::decodeRuns(sp, 16, true, detail::isHexChar, detail::decodeHex, dec, &spans);
+                    for (std::size_t i = 0; i < dec.size(); ++i)
+                        scanDecoded(dec[i], Enc::Hex, source, sink,
+                                    rv.cutHead && spans[i].first == 0, rv.cutTail && spans[i].second == sp.size());
                 }
             };
-            for (const auto& s : ascii) decodeAndScan(s);
-            for (const auto& s : wide) decodeAndScan(s);
+            for (std::size_t i = 0; i < ascii.size(); ++i)
+                decodeAndScan(ascii[i], view(asciiOffsets[i], asciiMaps[i], 1, ascii[i].size()));
+            for (std::size_t i = 0; i < wide.size(); ++i)
+                decodeAndScan(wide[i], view(wideOffsets[i], wideMaps[i], 2, wide[i].size()));
         }
     }
 
 private:
-    void scanDecoded(const std::string& d, Enc enc, const std::string& source, Sink& sink) const {
+    void scanDecoded(const std::string& d, Enc enc, const std::string& source, Sink& sink,
+                     bool cutHead, bool cutTail) const {
         std::vector<std::string> runs;
-        detail::extractAscii(reinterpret_cast<const uint8_t*>(d.data()), d.size(), opt_.minRun, runs);
-        detail::extractUtf16(reinterpret_cast<const uint8_t*>(d.data()), d.size(), true, opt_.minRun, runs);
-        for (const auto& s : runs) match(s, enc, source, sink);
+        std::vector<std::size_t> offsets;
+        std::vector<std::vector<uint32_t>> maps;
+        auto matchRuns = [&](std::size_t stride) {
+            for (std::size_t i = 0; i < runs.size(); ++i) {
+                const auto& m = maps[i];
+                const std::size_t end = offsets[i] + (m.empty() ? runs[i].size() * stride : m.back() + stride);
+                match(runs[i], enc, source, sink,
+                      detail::RunView{0, false, stride, m.empty() ? nullptr : &m, nullptr,
+                                      cutHead && offsets[i] == 0, cutTail && end == d.size()});
+            }
+            runs.clear(); offsets.clear(); maps.clear();
+        };
+        detail::extractAscii(reinterpret_cast<const uint8_t*>(d.data()), d.size(), opt_.minRun,
+                             runs, &offsets, &maps);
+        matchRuns(1);
+        detail::extractUtf16(reinterpret_cast<const uint8_t*>(d.data()), d.size(), true, opt_.minRun,
+                             runs, &offsets, &maps);
+        matchRuns(2);
     }
 
     /* JSON/JS/percent escaped text: only what the escapes hid is reported, so
@@ -733,14 +798,39 @@ private:
         std::vector<uint32_t> map(src.size());
         for (std::size_t k = 0; k < src.size(); ++k)
             map[k] = rv.map ? (*rv.map)[src[k]] : uint32_t(src[k] * rv.stride);
-        match(u, Enc::Escaped, source, sink, detail::RunView{rv.base, rv.known, 1, &map, &kind});
+        match(u, Enc::Escaped, source, sink,
+              detail::RunView{rv.base, rv.known, 1, &map, &kind, rv.cutHead, rv.cutTail});
     }
 
     void match(const std::string& s, Enc enc, const std::string& source, Sink& sink,
                const detail::RunView& rv = {}) const {
-        if (s.size() > opt_.maxCandidate) return;
-        if (urlMode_) matchUrls(s, enc, source, sink, rv);
-        else matchRegex(s, enc, source, sink, rv);
+        const std::size_t cap = std::max<std::size_t>(opt_.maxCandidate, 512);
+        const std::size_t width = cap > (std::numeric_limits<std::size_t>::max() - 1) / 2
+                                ? std::numeric_limits<std::size_t>::max() : cap * 2 + 1;
+        for (std::size_t begin = 0; begin < s.size();) {
+            const std::size_t end = std::min(s.size(), begin + std::min(width, s.size() - begin));
+            if (begin == 0 && end == s.size()) {
+                if (urlMode_) matchUrls(s, enc, source, sink, rv);
+                else matchRegex(s, enc, source, sink, rv);
+                break;
+            }
+            std::vector<uint32_t> map;
+            std::vector<uint8_t> esc;
+            if (rv.map) {
+                map.reserve(end - begin);
+                const uint32_t origin = (*rv.map)[begin];
+                for (std::size_t i = begin; i < end; ++i) map.push_back((*rv.map)[i] - origin);
+            }
+            if (rv.esc) esc.assign(rv.esc->begin() + begin, rv.esc->begin() + end);
+            const detail::RunView slice{rv.at(begin), rv.known, rv.stride,
+                                        rv.map ? &map : nullptr, rv.esc ? &esc : nullptr,
+                                        rv.cutHead || begin != 0, rv.cutTail || end != s.size()};
+            const std::string part = s.substr(begin, end - begin);
+            if (urlMode_) matchUrls(part, enc, source, sink, slice);
+            else matchRegex(part, enc, source, sink, slice);
+            if (end == s.size()) break;
+            begin += cap;
+        }
     }
 
     void matchUrls(const std::string& s, Enc enc, const std::string& source, Sink& sink,
@@ -749,12 +839,21 @@ private:
         while ((pos = s.find("://", pos)) != std::string::npos) {
             std::size_t start = pos;
             while (start > 0 && detail::isAlpha(s[start - 1])) --start;
-            std::string scheme = s.substr(start, pos - start);
-            std::transform(scheme.begin(), scheme.end(), scheme.begin(),
-                           [](unsigned char c) { return char(std::tolower(c)); });
+            std::string scheme;
+            for (std::size_t q = std::max(start, pos > 5 ? pos - 5 : 0); q < pos; ++q) {
+                std::string candidate = s.substr(q, pos - q);
+                std::transform(candidate.begin(), candidate.end(), candidate.begin(),
+                               [](unsigned char c) { return char(std::tolower(c)); });
+                if (detail::schemeKnown(candidate)) { start = q; scheme = std::move(candidate); break; }
+            }
             if (scheme.empty() || !detail::schemeKnown(scheme)) { pos += 3; continue; }
             std::size_t end = pos + 3;
-            while (end < s.size() && detail::isUrlChar(s[end])) ++end;
+            for (bool path = false; end < s.size();) {
+                if (detail::isUrlChar(s[end])) { path |= s[end] == '/' || s[end] == '?' || s[end] == '#'; ++end; continue; }
+                const std::size_t len = path ? detail::urlTextChar(s, end) : 0;
+                if (!len) break;
+                end += len;
+            }
             std::string url = detail::trimUrl(s.substr(start, end - start));
             std::string host = detail::urlHost(url);
             bool emit = !rv.esc;
@@ -763,14 +862,16 @@ private:
                 for (std::size_t q = pos; q < pos + 3; ++q) emit |= k[q] != 0;
                 for (std::size_t q = start; !emit && q < start + url.size(); ++q) emit |= k[q] == 1;
             }
-            if (emit && url.size() >= 8 && detail::plausibleHost(host) &&
+            if (emit && url.size() <= opt_.maxCandidate &&
+                !(rv.cutHead && start == 0) && !(rv.cutTail && end == s.size()) &&
+                url.size() >= 8 && detail::plausibleHost(host) &&
                 !(opt_.dropCrap && detail::looksCrap(host)) &&
                 (opt_.schemes.empty() ||
                  std::find(opt_.schemes.begin(), opt_.schemes.end(), scheme) != opt_.schemes.end()))
                 sink.add(url, enc, source, host, rv.at(start), rv.known,
                          detail::clipUtf8(s.substr(start > 32 ? start - 32 : 0, std::min<std::size_t>(32, start))),
                          detail::clipUtf8(s.substr(start + url.size(), 32)));
-            pos = end;
+            pos = rv.esc ? pos + 3 : end;
         }
     }
 
@@ -778,10 +879,13 @@ private:
                     const detail::RunView& rv) const {
         constexpr std::size_t window = 1024, step = 512;
         for (std::size_t i = 0; i < matchers_.size(); ++i) {
-            for (std::size_t base = 0; base < s.size(); base += step) {
+            bool alignedStart = false;
+            for (std::size_t base = 0; base < s.size();) {
                 const std::size_t limit = std::min(s.size(), base + window);
                 if (hints_[i] && std::find(s.begin() + base, s.begin() + limit, hints_[i]) == s.begin() + limit) {
                     if (limit == s.size()) break;
+                    base += step;
+                    alignedStart = false;
                     continue;
                 }
                 auto flags = std::regex_constants::match_default;
@@ -793,15 +897,20 @@ private:
                     it = std::sregex_iterator(s.begin() + base, s.begin() + limit, matchers_[i], flags);
                 } catch (const std::regex_error&) {
                     if (limit == s.size()) break;
+                    base += step;
+                    alignedStart = false;
                     continue;
                 }
+                std::size_t lastEnd = base;
                 for (; it != end; ) {
                     std::string v = it->str();
                     auto pos = base + static_cast<std::size_t>(it->position());
                     bool emit = !rv.esc;
                     for (std::size_t q = pos; !emit && q < pos + v.size(); ++q) emit = (*rv.esc)[q] != 0;
-                    if (emit && !v.empty() && v.size() <= step &&
-                        (!base || pos != base) &&
+                    if (emit && !v.empty() && v.size() <= opt_.maxCandidate &&
+                        !(rv.cutHead && pos == 0) &&
+                        !(rv.cutTail && pos + v.size() == s.size()) && v.size() <= step &&
+                        (!base || pos != base || alignedStart) &&
                         (limit == s.size() || pos <= base + step)) {
                         std::vector<std::pair<std::string, std::string>> captures;
                         for (const auto& [index, name] : captures_[i])
@@ -810,10 +919,13 @@ private:
                         sink.add(v, enc, source, names_[i], rv.at(pos), rv.known,
                                  detail::clipUtf8(s.substr(pos > 32 ? pos - 32 : 0, std::min<std::size_t>(32, pos))),
                                  detail::clipUtf8(s.substr(pos + v.size(), 32)), std::move(captures));
+                        lastEnd = pos + v.size();
                     }
                     try { ++it; } catch (const std::regex_error&) { break; }
                 }
                 if (limit == s.size()) break;
+                alignedStart = lastEnd > base;
+                base = alignedStart ? lastEnd : base + step;
             }
         }
     }

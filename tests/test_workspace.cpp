@@ -32,6 +32,26 @@ int main() {
     auto parsed = ur::parseJob(ur::serializeJob(job));
     require(parsed && parsed->sources == job.sources && parsed->files.exclude == "ignored" &&
             parsed->monitorSeconds == 5, "job roundtrip");
+    {
+        ur::ScanJob process = job;
+        process.sources.clear(); process.pid = 1234; process.processName = "app.exe";
+        auto current = ur::parseJob(ur::serializeJob(process));
+        require(current && current->pid == 1234 && current->processName == "app.exe",
+                "process job keeps its name");
+        std::string oldRow = ur::serializeJob(process);
+        oldRow.replace(0, 6, "SRJOB2");
+        const auto name = oldRow.find("\"app.exe\" ");
+        oldRow.erase(name, std::string("\"app.exe\" ").size());
+        auto oldProcess = ur::parseJob(oldRow);
+        require(oldProcess && oldProcess->pid == 1234 && oldProcess->processName.empty(),
+                "old pid-only job still parses");
+        require(ur::resolveProcessJob(process, {{5555, "APP.EXE"}, {1234, "other.exe"}}) == 5555,
+                "restarted process job resolves by name");
+        require(!ur::resolveProcessJob(process, {{1234, "other.exe"}}),
+                "reused pid cannot select another process");
+        require(!ur::resolveProcessJob(*oldProcess, {{1234, "app.exe"}}),
+                "pid-only job cannot prove process identity");
+    }
     require(!ur::parseJob("SRJOB2 invalid"), "invalid job rejection");
     {
         ur::ScanJob e = job; e.options.escaped = false;

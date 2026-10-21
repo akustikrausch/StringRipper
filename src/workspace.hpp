@@ -1,6 +1,8 @@
 #pragma once
 
 #include "scan_core.hpp"
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <iomanip>
 #include <optional>
@@ -33,7 +35,23 @@ struct ScanJob {
     Options options;
     FileSelection files;
     unsigned monitorSeconds = 0;
+    std::string processName;
 };
+
+inline std::optional<uint32_t> resolveProcessJob(
+    const ScanJob& job, const std::vector<std::pair<uint32_t, std::string>>& processes) {
+    if (job.processName.empty()) return std::nullopt;
+    auto same = [&](const std::string& name) {
+        if (name.size() != job.processName.size()) return false;
+        for (std::size_t i = 0; i < name.size(); ++i)
+            if (std::tolower(static_cast<unsigned char>(name[i])) !=
+                std::tolower(static_cast<unsigned char>(job.processName[i]))) return false;
+        return true;
+    };
+    for (const auto& [pid, name] : processes) if (pid == job.pid && same(name)) return pid;
+    for (const auto& [pid, name] : processes) if (same(name)) return pid;
+    return std::nullopt;
+}
 
 struct Session {
     int64_t id = 0;
@@ -68,7 +86,8 @@ inline std::string serializeJob(const ScanJob& j) {
     std::ostringstream s;
     const auto& o = j.options;
     const auto& f = j.files;
-    s << "SRJOB2 " << std::quoted(j.name) << ' ' << j.pid << ' ' << j.monitorSeconds << ' '
+    s << "SRJOB3 " << std::quoted(j.name) << ' ' << j.pid << ' '
+      << std::quoted(j.processName) << ' ' << j.monitorSeconds << ' '
       << int(o.mode) << ' ' << o.ascii << ' ' << o.utf16 << ' ' << o.base64 << ' ' << o.hex << ' '
       << o.minRun << ' ' << o.maxCandidate << ' ' << std::quoted(o.customRegex) << ' '
       << std::quoted(o.customLabel) << ' ' << o.customWholeWord << ' ' << o.caseInsensitive << ' '
@@ -96,8 +115,10 @@ inline std::optional<ScanJob> parseJob(const std::string& data) {
     ScanJob j; std::istringstream s(data); std::string magic;
     int mode;
     auto& o = j.options; auto& f = j.files;
-    if (!(s >> magic) || magic != "SRJOB2" ||
-        !(s >> std::quoted(j.name) >> j.pid >> j.monitorSeconds >> mode >>
+    if (!(s >> magic) || (magic != "SRJOB2" && magic != "SRJOB3") ||
+        !(s >> std::quoted(j.name) >> j.pid)) return std::nullopt;
+    if (magic == "SRJOB3" && !(s >> std::quoted(j.processName))) return std::nullopt;
+    if (!(s >> j.monitorSeconds >> mode >>
           o.ascii >> o.utf16 >> o.base64 >> o.hex >> o.minRun >> o.maxCandidate >>
           std::quoted(o.customRegex) >> std::quoted(o.customLabel) >> o.customWholeWord >>
           o.caseInsensitive >> o.dropCrap >> std::quoted(f.include) >> std::quoted(f.exclude) >>

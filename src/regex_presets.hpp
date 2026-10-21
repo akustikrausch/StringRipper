@@ -274,11 +274,19 @@ inline PresetCli presetCli(const std::vector<std::string>& args, std::filesystem
         if (a == "--help" || a == "-h" || a == "/?") return {};
         if (a == "--list-user-presets") { result.list = true; continue; }
         if (a == "--user-preset" || a == "--presets-file" || a == "--regex" || a == "--preset" ||
-            a == "--file" || a == "--folder" || a == "--pid" || a == "--scheme" ||
-            a == "--out" || a == "--format") {
+            a == "--file" || a == "--folder" || a == "--pid" || a == "--name" ||
+            a == "--scheme" || a == "--out" || a == "--format" || a == "--ignore" ||
+            a == "--include" || a == "--exclude" || a == "--min-size" || a == "--max-size" ||
+            a == "--modified-after" || a == "--modified-before" || a == "--range-start" ||
+            a == "--range-end" || a == "--db" || a == "--save-session" ||
+            a == "--open-session" || a == "--save-job" || a == "--run-job" || a == "--favorite") {
             if (++i == args.size()) throw std::invalid_argument("missing value for " + a);
             if (a == "--user-preset") { if (args[i].empty()) throw RegexError("preset name is empty"); names.push_back(args[i]); }
             if (a == "--presets-file") file = std::filesystem::u8path(args[i]);
+        }
+        if (a == "--compare-sessions") {
+            if (i + 2 >= args.size()) throw std::invalid_argument("missing value for " + a);
+            i += 2;
         }
     }
     if (result.list || !names.empty()) {

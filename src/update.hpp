@@ -4,14 +4,20 @@
    over. The divergence: StringRipper ships one portable exe, not an Inno
    installer, so "install" self-replaces the running exe and relaunches. Win32 +
    WinHTTP + bcrypt instead of Qt. User presets (regex-user-presets.ini next to
-   the exe) and the workspace database (%LOCALAPPDATA%) are never touched. */
+   the exe) and the workspace database are never touched. */
 #pragma once
+
+#include "update_validation.hpp"
 
 #include <windows.h>
 #include <winhttp.h>
 #include <bcrypt.h>
+#include <array>
+#include <atomic>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -77,6 +83,34 @@ inline std::string sha256Hex(const void* data, std::size_t len) {
     return out;
 }
 
+inline std::string sha256File(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return {};
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    std::string out;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) return {};
+    if (BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0) == 0) {
+        std::array<char, 65536> buf;
+        bool ok = true;
+        while (file) {
+            file.read(buf.data(), buf.size());
+            const auto got = file.gcount();
+            if (got && BCryptHashData(hash, reinterpret_cast<PUCHAR>(buf.data()), ULONG(got), 0) != 0) {
+                ok = false; break;
+            }
+        }
+        unsigned char digest[32];
+        if (ok && file.eof() && BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0) {
+            static const char* hex = "0123456789abcdef";
+            for (unsigned char b : digest) { out += hex[b >> 4]; out += hex[b & 15]; }
+        }
+        BCryptDestroyHash(hash);
+    }
+    BCryptCloseAlgorithmProvider(alg, 0);
+    return out;
+}
+
 // Fixed-shape manifest: every key we read (version, url, size, sha256,
 // changelog, minVersion, notes) is unique across the document, so a flat
 // search by "key" needs no object-brace tracking. Only the installer block
@@ -137,21 +171,54 @@ inline long long jsonNumber(const std::string& j, const char* key) {
     std::size_t p = jsonValuePos(j, key);
     if (p == std::string::npos) return 0;
     long long n = 0; bool any = false;
-    for (; p < j.size() && j[p] >= '0' && j[p] <= '9'; ++p) { n = n * 10 + (j[p] - '0'); any = true; }
+    for (; p < j.size() && j[p] >= '0' && j[p] <= '9'; ++p) {
+        const int digit = j[p] - '0';
+        if (n > (std::numeric_limits<long long>::max() - digit) / 10) return 0;
+        n = n * 10 + digit; any = true;
+    }
     return any ? n : 0;
 }
 } // namespace detail
 
 inline bool parseManifest(const std::string& json, UpdateInfo& info) {
     info.version = detail::jsonString(json, "version");
-    if (info.version.empty()) return false;
+    if (!validUpdateVersion(info.version)) return false;
     info.url = detail::jsonString(json, "url");
     info.sha256 = detail::jsonString(json, "sha256");
     info.size = detail::jsonNumber(json, "size");
     info.changelog = detail::jsonString(json, "changelog");
     info.minVersion = detail::jsonString(json, "minVersion");
+    if (!info.minVersion.empty() && !validUpdateVersion(info.minVersion)) return false;
     info.notes = detail::jsonString(json, "notes");
+    if (!validUpdateNotes(info.notes)) info.notes.clear();
     return true;
+}
+
+struct HttpAsyncState {
+    HANDLE ready = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    HANDLE closed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::atomic<DWORD> status{0}, amount{0}, error{0};
+    std::atomic<int> refs{2};
+    ~HttpAsyncState() { CloseHandle(ready); CloseHandle(closed); }
+    void release() { if (refs.fetch_sub(1) == 1) delete this; }
+};
+
+inline void CALLBACK httpStatus(HINTERNET, DWORD_PTR context, DWORD status, void* info, DWORD length) {
+    auto* state = reinterpret_cast<HttpAsyncState*>(context);
+    if (!state) return;
+    if (status == WINHTTP_CALLBACK_STATUS_HANDLE_CLOSING) {
+        SetEvent(state->closed);
+        state->release();
+        return;
+    }
+    if (status == WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE && info)
+        state->amount = *static_cast<DWORD*>(info);
+    if (status == WINHTTP_CALLBACK_STATUS_READ_COMPLETE)
+        state->amount = length;
+    if (status == WINHTTP_CALLBACK_STATUS_REQUEST_ERROR && info)
+        state->error = static_cast<WINHTTP_ASYNC_RESULT*>(info)->dwError;
+    state->status = status;
+    SetEvent(state->ready);
 }
 
 // WinHTTP GET into `out`. Follows https->https redirects (GitHub's asset alias
@@ -160,58 +227,96 @@ inline bool parseManifest(const std::string& json, UpdateInfo& info) {
 inline bool httpGet(const std::wstring& url, std::string& out, std::string* err,
                     long long maxBytes, const std::wstring& ua,
                     void (*onProgress)(long long, long long, void*) = nullptr,
-                    void* progressCtx = nullptr, const volatile bool* cancel = nullptr) {
+                    void* progressCtx = nullptr, const std::atomic_bool* cancel = nullptr) {
     auto fail = [&](const char* m) { if (err) *err = m; return false; };
     URL_COMPONENTS uc{}; uc.dwStructSize = sizeof(uc);
-    wchar_t host[256]{}, path[4096]{};
+    wchar_t host[256]{}, path[4096]{}, extra[4096]{};
     uc.lpszHostName = host; uc.dwHostNameLength = 255;
     uc.lpszUrlPath = path; uc.dwUrlPathLength = 4095;
+    uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 4095;
     if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) return fail("bad update url");
     if (uc.nScheme != INTERNET_SCHEME_HTTPS) return fail("update url is not https");
 
     HINTERNET ses = WinHttpOpen(ua.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-                                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+                                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, WINHTTP_FLAG_ASYNC);
     if (!ses) return fail("no internet connection");
     WinHttpSetTimeouts(ses, 10000, 10000, 30000, 30000);
     HINTERNET con = WinHttpConnect(ses, host, uc.nPort, 0);
     if (!con) { WinHttpCloseHandle(ses); return fail("no internet connection"); }
-    HINTERNET req = WinHttpOpenRequest(con, L"GET", path, nullptr, WINHTTP_NO_REFERER,
+    const std::wstring target = std::wstring(path) + extra;
+    HINTERNET req = WinHttpOpenRequest(con, L"GET", target.c_str(), nullptr, WINHTTP_NO_REFERER,
                                        WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    bool ok = false; long long total = 0, got = 0;
-    if (req && WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                                  WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-        WinHttpReceiveResponse(req, nullptr)) {
+    if (!req) { WinHttpCloseHandle(con); WinHttpCloseHandle(ses); return fail("no internet connection"); }
+    auto* state = new HttpAsyncState;
+    if (!state->ready || !state->closed ||
+        WinHttpSetStatusCallback(req, httpStatus,
+            WINHTTP_CALLBACK_FLAG_ALL_COMPLETIONS | WINHTTP_CALLBACK_FLAG_HANDLES,
+            0) == WINHTTP_INVALID_STATUS_CALLBACK) {
+        WinHttpCloseHandle(req); WinHttpCloseHandle(con); WinHttpCloseHandle(ses);
+        delete state;
+        return fail("no internet connection");
+    }
+    DWORD_PTR context = reinterpret_cast<DWORD_PTR>(state);
+    if (!WinHttpSetOption(req, WINHTTP_OPTION_CONTEXT_VALUE, &context, sizeof(context))) {
+        WinHttpCloseHandle(req); WinHttpCloseHandle(con); WinHttpCloseHandle(ses);
+        delete state;
+        return fail("no internet connection");
+    }
+    auto waitFor = [&](DWORD expected) {
+        for (;;) {
+            if (cancel && cancel->load()) return false;
+            if (WaitForSingleObject(state->ready, 25) != WAIT_OBJECT_0) continue;
+            const DWORD status = state->status.load();
+            if (status == WINHTTP_CALLBACK_STATUS_REQUEST_ERROR) return false;
+            if (status == expected) return true;
+        }
+    };
+    auto started = [](BOOL result) { return result || GetLastError() == ERROR_IO_PENDING; };
+    bool ok = false;
+    if (!(cancel && cancel->load()) &&
+        started(WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                  WINHTTP_NO_REQUEST_DATA, 0, 0, context)) &&
+        waitFor(WINHTTP_CALLBACK_STATUS_SENDREQUEST_COMPLETE) &&
+        started(WinHttpReceiveResponse(req, nullptr)) &&
+        waitFor(WINHTTP_CALLBACK_STATUS_HEADERS_AVAILABLE)) {
         DWORD status = 0, sl = sizeof(status);
-        WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &sl, WINHTTP_NO_HEADER_INDEX);
-        if (status == 200) {
+        if (WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &status, &sl, WINHTTP_NO_HEADER_INDEX) &&
+            status == 200) {
+            long long total = 0, got = 0;
             wchar_t clen[32]{}; DWORD cl = sizeof(clen);
             if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX,
-                                    clen, &cl, WINHTTP_NO_HEADER_INDEX))
-                total = _wtoi64(clen);
-            ok = true; DWORD avail = 0;
-            do {
-                if (cancel && *cancel) { ok = false; if (err) *err = "cancelled"; break; }
-                if (!WinHttpQueryDataAvailable(req, &avail)) { ok = false; break; }
+                                    clen, &cl, WINHTTP_NO_HEADER_INDEX)) total = _wtoi64(clen);
+            ok = true;
+            for (;;) {
+                if (!started(WinHttpQueryDataAvailable(req, nullptr)) ||
+                    !waitFor(WINHTTP_CALLBACK_STATUS_DATA_AVAILABLE)) { ok = false; break; }
+                DWORD avail = state->amount.load();
                 if (!avail) break;
-                std::string buf(avail, '\0'); DWORD read = 0;
-                if (!WinHttpReadData(req, buf.data(), avail, &read)) { ok = false; break; }
+                if (maxBytes > 0 && avail > static_cast<unsigned long long>(maxBytes - got)) {
+                    ok = false; if (err) *err = "update file too large"; break;
+                }
+                std::string buf(avail, '\0');
+                if (!started(WinHttpReadData(req, buf.data(), avail, nullptr)) ||
+                    !waitFor(WINHTTP_CALLBACK_STATUS_READ_COMPLETE)) { ok = false; break; }
+                const DWORD read = state->amount.load();
+                if (!read) { ok = false; break; }
                 out.append(buf.data(), read); got += read;
-                if (maxBytes > 0 && got > maxBytes) { ok = false; if (err) *err = "update file too large"; break; }
                 if (onProgress) onProgress(got, total, progressCtx);
-            } while (avail > 0);
+            }
         } else if (status == 404) {
             if (err) *err = "no release manifest found";
-        } else {
-            if (err) *err = "update check failed";
-        }
-    } else if (err) *err = "no internet connection";
-    if (req) WinHttpCloseHandle(req);
+        } else if (err) *err = "update check failed";
+    }
+    if (!ok && err && err->empty()) *err = cancel && cancel->load() ? "cancelled" : "no internet connection";
+    WinHttpCloseHandle(req);
+    WaitForSingleObject(state->closed, 1500);
+    state->release();
     WinHttpCloseHandle(con); WinHttpCloseHandle(ses);
     return ok;
 }
 
-/* Persisted preferences, %LOCALAPPDATA%\StringRipper\update.ini. Mirrors
+/* Persisted preferences, StringRipper.update.ini next to the exe. Mirrors
    FXChainPlayer's updates.autoCheck / skippedVersion / cached snapshot. */
 struct UpdatePrefs {
     bool autoCheck = true;
@@ -245,11 +350,11 @@ struct UpdatePrefs {
         std::ofstream f(p, std::ios::trunc);
         f << "autocheck=" << (autoCheck ? 1 : 0) << "\n"
           << "asked=" << (asked ? 1 : 0) << "\n"
-          << "skipped=" << skipped << "\n"
-          << "cached_version=" << cachedVersion << "\n"
-          << "cached_url=" << cachedUrl << "\n"
-          << "cached_sha256=" << cachedSha256 << "\n"
-          << "cached_changelog=" << cachedChangelog << "\n"
+          << "skipped=" << settingLine(skipped) << "\n"
+          << "cached_version=" << settingLine(cachedVersion) << "\n"
+          << "cached_url=" << settingLine(cachedUrl) << "\n"
+          << "cached_sha256=" << settingLine(cachedSha256) << "\n"
+          << "cached_changelog=" << settingLine(cachedChangelog) << "\n"
           << "cached_size=" << cachedSize << "\n";
     }
 };
@@ -270,17 +375,35 @@ inline void cleanupSelfReplace() {
 // caller can release its single-instance mutex in between: otherwise the fresh
 // process races the still-closing old one for the mutex and bows out, leaving
 // nothing running after an update.
-inline bool selfReplace(const std::filesystem::path& downloaded, std::string* err) {
+inline bool selfReplace(const std::filesystem::path& downloaded, const std::string& expectedHash, std::string* err) {
+    std::string want = expectedHash;
+    for (char& c : want) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (sha256File(downloaded) != want) {
+        if (err) *err = "the downloaded file changed (checksum mismatch)";
+        return false;
+    }
     wchar_t exeBuf[MAX_PATH]{}; GetModuleFileNameW(nullptr, exeBuf, MAX_PATH);
     std::filesystem::path exe = exeBuf, old = std::filesystem::path(exe).concat(L".old");
-    std::error_code ec; std::filesystem::remove(old, ec);
+    std::filesystem::path stage = std::filesystem::path(exe).concat(L".new");
+    std::error_code ec;
+    std::filesystem::copy_file(downloaded, stage, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) { if (err) *err = "cannot stage update beside the exe"; return false; }
+    if (sha256File(stage) != want) {
+        std::filesystem::remove(stage, ec);
+        if (err) *err = "the staged file changed (checksum mismatch)";
+        return false;
+    }
+    std::filesystem::remove(old, ec);
     if (!MoveFileExW(exe.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        std::filesystem::remove(stage, ec);
         if (err) *err = "cannot update in place (folder not writable)"; return false;
     }
-    if (!MoveFileExW(downloaded.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+    if (!MoveFileExW(stage.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         MoveFileExW(old.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING);   // roll back
+        std::filesystem::remove(stage, ec);
         if (err) *err = "cannot write the new version"; return false;
     }
+    std::filesystem::remove(downloaded, ec);
     return true;
 }
 inline void relaunchSelf() {

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "scan_core.hpp"
+#include "path_encoding.hpp"
 #if __has_include("audio/memory_ripper.h")
 #include "audio/memory_ripper.h"
 #define SR_HAVE_RIPPER 1
@@ -86,14 +87,16 @@ public:
     bool cancelled() const { return cancel_ && cancel_(); }
 
     void submit(std::vector<uint8_t>&& buf, const std::string& source, uint64_t freshBytes = 0,
-                uint64_t origin = 0, bool knownOffset = false) {
+                uint64_t origin = 0, bool knownOffset = false,
+                bool cutHead = false, bool cutTail = false) {
         std::size_t sz = buf.size();
         std::unique_lock lk(m_);
         drained_.wait(lk, [&] { return failure_ || !inFlightBytes_ ||
             (sz <= maxInFlight_ && inFlightBytes_ <= maxInFlight_ - sz); });
         if (failure_) std::rethrow_exception(failure_);
         if (cancelled()) return;
-        q_.push_back(Task{std::move(buf), source, freshBytes ? freshBytes : sz, origin, knownOffset});
+        q_.push_back(Task{std::move(buf), source, freshBytes ? freshBytes : sz, origin,
+                          knownOffset, cutHead, cutTail});
         inFlightBytes_ += sz;
         cv_.notify_one();
     }
@@ -108,7 +111,7 @@ public:
 private:
     struct Task {
         std::vector<uint8_t> buf; std::string source;
-        uint64_t freshBytes, origin; bool knownOffset;
+        uint64_t freshBytes, origin; bool knownOffset, cutHead, cutTail;
     };
 
     void stop() {
@@ -132,7 +135,7 @@ private:
                     if (pause_) pause_();
                     if (!cancelled()) {
                         det_.scan(task.buf.data(), task.buf.size(), task.source, sinks_[idx],
-                                  task.origin, task.knownOffset);
+                                  task.origin, task.knownOffset, task.cutHead, task.cutTail);
                         if (progress_) progress_->completed += task.freshBytes;
                     }
                 }
@@ -233,7 +236,8 @@ inline uint64_t scanReaderInto(fxchain::IMemoryReader& reader, ScanPool& pool,
                 std::size_t keep = std::min<std::size_t>(lim.overlap, buf.size());
                 tail.assign(buf.end() - keep, buf.end());
                 total += r.bytesRead;
-                pool.submit(std::move(buf), source, r.bytesRead, off - prefix, true);
+                pool.submit(std::move(buf), source, r.bytesRead, off - prefix, true,
+                            prefix != 0, off + r.bytesRead < spanEnd);
                 if (progress && !progress(total)) return total;
                 off += r.bytesRead;
             }
@@ -253,7 +257,7 @@ inline bool scanFileInto(const std::filesystem::path& path, ScanPool& pool, cons
     if (lim.rangeEnd && lim.rangeEnd <= lim.rangeStart) return false;
     if (lim.rangeStart) f.seekg(static_cast<std::streamoff>(lim.rangeStart));
     if (!f) return false;
-    const std::string label = path.string();
+    const std::string label = pathUtf8(path);
     std::vector<uint8_t> chunk(lim.window);
     std::vector<uint8_t> tail;
     uint64_t done = 0;
@@ -277,7 +281,8 @@ inline bool scanFileInto(const std::filesystem::path& path, ScanPool& pool, cons
         std::size_t keep = std::min<std::size_t>(lim.overlap, buf.size());
         tail.assign(buf.end() - keep, buf.end());
         pool.submit(std::move(buf), label, static_cast<uint64_t>(got),
-                    lim.rangeStart + done - static_cast<uint64_t>(got) - prefix, true);
+                    lim.rangeStart + done - static_cast<uint64_t>(got) - prefix, true,
+                    prefix != 0, done < byteLimit && got == static_cast<std::streamsize>(want));
         if (!f) break;
     }
     return !f.bad();

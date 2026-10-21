@@ -8,3 +8,15 @@
 *.exe.manifest
 # bin/StringRipper.exe is committed on purpose
 /dist/
+# local spec workflow, not part of the repo
+/openspec/
+/.claude/
+/.agents/
+/AGENTS.md
+/CLAUDE.md
+# portable data next to a test exe
+/bin/StringRipper.workspace.sqlite*
+/bin/StringRipper.update.ini
+/bin/*.exe.download
+/bin/*.exe.new
+/bin/*.exe.old

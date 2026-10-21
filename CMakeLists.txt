@@ -87,6 +87,8 @@ target_compile_definitions(test_presets PRIVATE SR_SOURCE_DIR="${CMAKE_SOURCE_DI
 add_test(NAME regex_presets COMMAND test_presets)
 add_executable(test_features tests/test_features.cpp)
 add_test(NAME result_features COMMAND test_features)
+add_test(NAME export_json_strict COMMAND ${CMAKE_COMMAND}
+  "-DFEATURES=$<TARGET_FILE:test_features>" -P "${CMAKE_SOURCE_DIR}/tests/json_strict.cmake")
 add_executable(test_workspace tests/test_workspace.cpp)
 target_link_libraries(test_workspace PRIVATE sr_store)
 add_test(NAME workspace COMMAND test_workspace)

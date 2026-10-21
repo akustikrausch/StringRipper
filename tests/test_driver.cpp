@@ -3,6 +3,7 @@
 // process. Needs the FXChainPlayer include path (for IMemoryReader). Build:
 //   cl /std:c++20 /EHsc /I <fxcp>/src /I src tests\test_driver.cpp
 #include "scan_driver.hpp"
+#include "file_read.hpp"
 #include "audio/rip_backend.h"
 
 #include <cstdio>
@@ -74,6 +75,19 @@ int main() {
         }
     }
     {
+        MockReader edge; edge.mem.resize(128);
+        const char* url = "https://example-cdn.com/path/to/file.bin";
+        std::memcpy(edge.mem.data() + 42, url, std::strlen(url));
+        ur::DriverLimits small; small.window = 64; small.overlap = 32;
+        ur::ScanPool p(det, 2, 256);
+        ur::scanReaderInto(edge, p, "edge", small);
+        auto hits = p.finish();
+        if (ur::countFindings(hits) != 1 || hits[0].items[0].value != url ||
+            hits[0].items[0].offset != edge.base + 42) {
+            std::puts("FAIL: memory-window URL must be whole and unique"); ++fail;
+        }
+    }
+    {
         bool cancel = true;
         ur::ScanProgress cancelled;
         ur::ScanPool p(det, 2, 8192, &cancelled, [&] { return cancel; });
@@ -113,6 +127,29 @@ int main() {
         ur::ScanPool bounded(det, 2, 8192, &snapshot);
         ur::scanFileInto(path, bounded, small, {}, 5000); bounded.finish();
         if (snapshot.completed != 5000) { std::puts("FAIL: file size snapshot exceeded"); ++fail; }
+        std::vector<uint8_t> edge(128);
+        const char* url = "https://example-cdn.com/path/to/file.bin";
+        std::memcpy(edge.data() + 42, url, std::strlen(url));
+        { std::ofstream f(path, std::ios::binary | std::ios::trunc); f.write((const char*)edge.data(), edge.size()); }
+        ur::DriverLimits edges; edges.window = 64; edges.overlap = 32;
+        ur::ScanPool p2(det, 2, 256);
+        ur::scanFileInto(path, p2, edges);
+        auto fileHits = p2.finish();
+        if (ur::countFindings(fileHits) != 1 || fileHits[0].items[0].value != url ||
+            fileHits[0].items[0].offset != 42) {
+            std::puts("FAIL: file-window URL must be whole and unique"); ++fail;
+        }
+        const auto unicode = std::filesystem::u8path(path.u8string() + u8"-Jürgen.bin");
+        { std::ofstream f(unicode, std::ios::binary); f.write((const char*)edge.data(), edge.size()); }
+        ur::ScanPool p3(det, 2, 256);
+        ur::scanFileInto(unicode, p3, edges);
+        auto unicodeHits = p3.finish();
+        if (ur::countFindings(unicodeHits) != 1 ||
+            unicodeHits[0].items[0].source != ur::pathUtf8(unicode) ||
+            !ur::patternListMatch("*Jürgen.bin", unicode)) {
+            std::puts("FAIL: non-ASCII file source and glob must use UTF-8"); ++fail;
+        }
+        std::filesystem::remove(unicode);
         std::filesystem::remove(path);
     }
     {

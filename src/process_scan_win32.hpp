@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scan_driver.hpp"
+#include "pe_sections.hpp"
 #include "audio/rip_backend.h"
 #include <windows.h>
 #include <psapi.h>
@@ -102,7 +103,7 @@ public:
     }
 
 private:
-    struct Module { std::string name; std::vector<std::tuple<std::string, uint32_t, uint32_t>> sections; };
+    struct Module { std::string name; std::vector<PeSection> sections; };
 
     bool read(uint64_t at, void* out, std::size_t n) const {
         SIZE_T got = 0;
@@ -127,21 +128,7 @@ private:
         m.name = fileName(base);
         if (m.name.empty()) m.name = "image";
         uint8_t h[4096];
-        uint32_t pe = 0;
-        if (read(base, h, sizeof(h)) && h[0] == 'M' && h[1] == 'Z') std::memcpy(&pe, h + 0x3C, 4);
-        if (pe && pe + 64 < sizeof(h) && std::memcmp(h + pe, "PE\0\0", 4) == 0) {
-            uint16_t count, opt;
-            uint32_t align;
-            std::memcpy(&count, h + pe + 6, 2); std::memcpy(&opt, h + pe + 20, 2); std::memcpy(&align, h + pe + 56, 4);
-            if (!align || (align & (align - 1))) align = 0x1000;
-            for (std::size_t s = pe + 24 + opt, i = 0; i < count && s + 40 <= sizeof(h); ++i, s += 40) {
-                char name[9] = {};
-                uint32_t size, va;
-                std::memcpy(name, h + s, 8); std::memcpy(&size, h + s + 8, 4); std::memcpy(&va, h + s + 12, 4);
-                if (!size) std::memcpy(&size, h + s + 16, 4);
-                m.sections.emplace_back(name, va, (va + size + align - 1) & ~(align - 1));
-            }
-        }
+        if (read(base, h, sizeof(h))) m.sections = parsePeSections(h, sizeof(h));
         return modules_.emplace(base, std::move(m)).first->second;
     }
 

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "workspace.hpp"
+#include "path_encoding.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cctype>
@@ -28,7 +29,7 @@ inline bool globMatch(std::string_view pattern, std::string_view value) {
 }
 
 inline bool patternListMatch(const std::string& patterns, const std::filesystem::path& path) {
-    const auto filename = path.filename().string(), full = path.generic_string();
+    const auto filename = pathUtf8(path.filename()), full = pathUtf8(path, true);
     std::size_t pos = 0;
     while (pos < patterns.size()) {
         auto end = patterns.find_first_of(";,", pos);

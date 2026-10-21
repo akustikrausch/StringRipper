@@ -38,6 +38,9 @@
 #include <vector>
 
 #include "scan_core.hpp"
+#include "path_handoff.hpp"
+#include "path_encoding.hpp"
+#include "cli_args.hpp"
 #include "regex_presets.hpp"
 #include "result_tools.hpp"
 #include "scan_driver.hpp"
@@ -145,63 +148,26 @@ static int runCli(int argc, wchar_t** argv) {
         SetConsoleOutputCP(CP_UTF8);                  // findings are UTF-8; hand the shell its code page back
     }
     struct RestoreCp { UINT cp; ~RestoreCp() { if (cp) { std::fflush(stdout); std::fflush(stderr); SetConsoleOutputCP(cp); } } } restore{cp};
-    ur::Options o;
-    ur::PresetCli preset;
+    ur::CliArgs cli;
     try {
         std::vector<std::string> args;
         for (int i = 1; i < argc; ++i) args.push_back(narrow(argv[i]));
-        preset = ur::presetCli(args, ur::executablePresets(argv[0]));
-        o = preset.options;
+        cli = ur::parseCliArgs(args, ur::presetCli(args, ur::executablePresets(argv[0])), true);
     } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 2; }
-    std::vector<std::filesystem::path> inputs;
-    uint32_t pid = 0;
-    std::string name;
-    std::vector<std::string> ignore;
-    std::wstring outFile;
-    std::string format = "txt";
-    bool help = false;
-
-    auto next = [&](int& i) -> std::wstring { return (i + 1 < argc) ? argv[++i] : std::wstring(); };
-    for (int i = 1; i < argc; ++i) {
-        std::wstring a = argv[i];
-        if (a == L"--help" || a == L"-h" || a == L"/?") help = true;
-        else if (a == L"--cli") {}
-        else if (a == L"--file" || a == L"--folder") inputs.push_back(next(i));
-        else if (a == L"--pid") pid = (uint32_t)std::wcstoul(next(i).c_str(), nullptr, 10);
-        else if (a == L"--name") name = narrow(next(i).c_str());
-        else if (a == L"--regex") {
-            o.mode = ur::Mode::Regex; o.customRegex = narrow(next(i).c_str()); o.customLabel = "Custom";
-            o.presets.clear(); o.extraPatterns.clear();
-        }
-        else if (a == L"--preset") {
-            o.mode = ur::Mode::Regex; o.presets = splitCsv(narrow(next(i).c_str()));
-            o.customRegex.clear(); o.extraPatterns.clear();
-        }
-        else if (a == L"--scheme") o.schemes = splitCsv(narrow(next(i).c_str()));
-        else if (a == L"--icase") o.caseInsensitive = true;
-        else if (a == L"--no-ascii") o.ascii = false;
-        else if (a == L"--no-utf16") o.utf16 = false;
-        else if (a == L"--no-base64") o.base64 = false;
-        else if (a == L"--no-hex") o.hex = false;
-        else if (a == L"--no-escaped") o.escaped = false;
-        else if (a == L"--ignore") ignore.push_back(narrow(next(i).c_str()));
-        else if (a == L"--out") outFile = next(i);
-        else if (a == L"--format") format = narrow(next(i).c_str());
-        else if (a == L"--user-preset" || a == L"--presets-file") next(i);
-        else if (a == L"--list-user-presets") {}
-        else if (a == L"--no-crap") o.dropCrap = false;
-        else { std::fprintf(stderr, "error: unknown option %s\n", narrow(a.c_str()).c_str()); return 2; }
-    }
-
-    if (format != "txt" && format != "csv" && format != "json") {
-        std::fprintf(stderr, "error: format must be txt, csv or json\n"); return 2;
-    }
-    if (preset.list && !help) {
-        for (const auto& p : preset.presets) std::printf("%s\n", p.name.c_str());
+    auto& o = cli.options;
+    auto& inputs = cli.inputs;
+    auto& selection = cli.selection;
+    uint32_t pid = cli.pid;
+    std::string name = cli.name;
+    const auto& format = cli.format;
+    if (cli.preset.list && !cli.help) {
+        for (const auto& p : cli.preset.presets) std::printf("%s\n", p.name.c_str());
         return 0;
     }
 
-    if (help || (inputs.empty() && pid == 0 && name.empty())) {
+    if (cli.help || (inputs.empty() && pid == 0 && name.empty() && cli.runJob.empty() &&
+                     !cli.listJobs && !cli.listFavorites && cli.favorite.empty() &&
+                     !cli.openSession && !cli.compareA)) {
         std::printf(
             "StringRipper " STRINGRIPPER_VERSION " - extract URLs or regex matches from processes and files.\n\n"
             "Usage:\n"
@@ -211,20 +177,75 @@ static int runCli(int argc, wchar_t** argv) {
             "  StringRipper.exe --folder PATH ...  [options]   scan a folder (recursive)\n\n"
             "Options:\n"
             "  --regex PAT      regex mode with a custom ECMAScript pattern\n"
-            "  --preset IDS     regex mode with presets (email,ipv4,ipv6,guid,apikey,filepath)\n"
+            "  --preset IDS     regex presets: email,ipv4,ipv6,guid,apikey,filepath,fileurl\n"
             "  --scheme LIST    URL mode: only these schemes (e.g. http,https)\n"
             "  --icase          case-insensitive matching\n"
             "  --no-ascii --no-utf16 --no-base64 --no-hex --no-escaped   turn off a decoder\n"
             "  --ignore RULE    hide a host (and its subdomains), a *glob* or =exact value; repeatable\n"
             "  --out FILE       write results to FILE (never uses the clipboard)\n\n"
-            "  --format TYPE    txt (default), csv or json\n"
+            "  --format TYPE    txt (default), csv, json or sqlite\n"
+            "  --include GLOBS --exclude GLOBS  file and folder patterns\n"
+            "  --min-size N --max-size N  file size filter in bytes\n"
+            "  --modified-after UNIX --modified-before UNIX  file date filter\n"
+            "  --range-start N --range-end N  byte range, end exclusive\n"
+            "  --db FILE --save-session NAME --open-session ID\n"
+            "  --compare-sessions ID1 ID2  show added and removed results\n"
+            "  --save-job NAME --run-job NAME --list-jobs  reusable scan jobs\n"
+            "  --favorite PATH --favorites  mark or list favorite sources\n"
             "  --user-preset NAME       load a saved regex user preset\n"
             "  --list-user-presets      list saved preset names and exit\n"
             "  --presets-file PATH      INI location (default: next to executable)\n\n"
-            "Runs as the invoking user. A target that needs more rights is offered an\n"
-            "elevated relaunch in the GUI; from a shell, start an elevated one yourself.\n\n"
+            "Runs as the invoking user; start elevated yourself if a target needs it.\n\n"
             "Reading a process reuses FXChainPlayer's ripper backend; scanning is multi-threaded.\n");
-        return help ? 0 : 2;
+        return cli.help ? 0 : 2;
+    }
+
+    try {
+        if (cli.listJobs || cli.listFavorites || !cli.favorite.empty() || cli.openSession ||
+            cli.compareA || !cli.runJob.empty()) {
+            ur::SessionStore db(cli.dbFile);
+            if (cli.listJobs) { for (const auto& job : db.listJobs()) std::puts(job.c_str()); return 0; }
+            if (cli.listFavorites) { for (const auto& item : db.favorites("source")) std::puts(item.c_str()); return 0; }
+            if (!cli.favorite.empty()) { db.setFavorite("source", cli.favorite, true); return 0; }
+            if (cli.openSession) {
+                const auto text = ur::exportResults(db.loadSession(cli.openSession).groups,
+                                                    format == "sqlite" ? "txt" : format);
+                std::fwrite(text.data(), 1, text.size(), stdout); return 0;
+            }
+            if (cli.compareA) {
+                const auto delta = ur::compareSessions(db.loadSession(cli.compareA).groups,
+                                                       db.loadSession(cli.compareB).groups);
+                const auto text = "Added:\n" + ur::exportResults(delta.added, "txt") +
+                                  "\nRemoved:\n" + ur::exportResults(delta.removed, "txt");
+                std::fwrite(text.data(), 1, text.size(), stdout); return 0;
+            }
+            auto job = db.loadJob(cli.runJob);
+            if (!job) throw std::runtime_error("unknown job: " + cli.runJob);
+            o = job->options; selection = job->files; inputs = job->sources; pid = job->pid;
+            if (inputs.empty()) {
+                if (job->processName.empty()) throw std::runtime_error("Process job has no name; save it again");
+                std::vector<std::pair<uint32_t, std::string>> active;
+                for (const auto& process : fxchain::ripBackend().enumerate())
+                    active.emplace_back(process.pid, process.name);
+                auto resolved = ur::resolveProcessJob(*job, active);
+                if (!resolved) throw std::runtime_error("Process is not running: " + job->processName);
+                pid = *resolved; name.clear();
+            }
+        }
+    } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 2; }
+
+    if (!cli.jobName.empty()) {
+        try {
+            ur::SessionStore db(cli.dbFile);
+            ur::ScanJob job{cli.jobName, inputs, pid, o, selection, 0};
+            if (inputs.empty()) {
+                job.processName = name;
+                if (job.processName.empty()) for (const auto& process : fxchain::ripBackend().enumerate())
+                    if (process.pid == pid) { job.processName = process.name; break; }
+                if (job.processName.empty()) throw std::runtime_error("Process is not running");
+            }
+            db.saveJob(job);
+        } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 2; }
     }
 
     std::unique_ptr<ur::Detector> det;
@@ -256,18 +277,34 @@ static int runCli(int argc, wchar_t** argv) {
         }
     } else {
         bool fdenied = false;
-        groups = ur::scanPaths(*det, inputs, &fdenied);
+        groups = ur::scanPaths(*det, inputs, &fdenied, nullptr, {}, selection);
         if (fdenied) std::fprintf(stderr, "note: some of that could not be read; try an elevated shell\n");
     }
     ur::resolveDownloadHosts(groups);
-    if (!ignore.empty()) groups = ur::filterIgnored(groups, ur::IgnoreRules::parse(ignore));
+    if (!cli.ignore.empty()) groups = ur::filterIgnored(groups, ur::IgnoreRules::parse(cli.ignore));
+
+    if (format == "sqlite" || !cli.sessionName.empty()) {
+        try {
+            ur::SessionStore db(format == "sqlite" && !cli.outFile.empty() ? cli.outFile : cli.dbFile);
+            std::string source = pid ? "pid:" + std::to_string(pid) : !name.empty() ? "name:" + name : "";
+            for (const auto& input : inputs) {
+                if (!source.empty()) source += "; ";
+                source += ur::pathUtf8(input);
+            }
+            const auto id = db.saveSession({0, cli.sessionName.empty() ? "Scan" : cli.sessionName,
+                                            source, "", groups});
+            std::printf("saved %zu findings as session %lld\n", ur::countFindings(groups),
+                        static_cast<long long>(id));
+        } catch (const std::exception& e) { std::fprintf(stderr, "error: %s\n", e.what()); return 2; }
+        if (format == "sqlite") return 0;
+    }
 
     std::string text = ur::exportResults(groups, format);
-    if (!outFile.empty()) {
-        if (!writeTextFile(outFile, text)) { std::fprintf(stderr, "error: cannot write output file\n"); return 2; }
-        std::printf("wrote %zu results to %S\n", ur::countFindings(groups), outFile.c_str());
+    if (!cli.outFile.empty()) {
+        if (!writeTextFile(cli.outFile.wstring(), text)) { std::fprintf(stderr, "error: cannot write output file\n"); return 2; }
+        std::printf("wrote %zu results to %S\n", ur::countFindings(groups), cli.outFile.c_str());
     } else {
-        std::fputs(text.c_str(), stdout);
+        std::fwrite(text.data(), 1, text.size(), stdout);
     }
     return ur::countFindings(groups) ? 0 : 1;
 }
@@ -366,6 +403,7 @@ std::thread g_scanThread;
 /* auto-update state, all touched only on the UI thread except the worker
    below, which only PostMessages back. See update.hpp. */
 std::filesystem::path appDataDir();
+bool g_portable = false;                           // data next to the exe
 ur::UpdatePrefs g_updatePrefs;
 ur::UpdateInfo g_update;
 std::thread g_updateThread;
@@ -375,7 +413,8 @@ HANDLE g_instanceMutex = nullptr;                  // single-instance guard, rel
 ur::IgnoreRules g_ignore;                          // rules in effect
 std::vector<std::string> g_ignoreLines;            // as the user wrote them, kept in the workspace db
 std::atomic<std::size_t> g_scanTargetsDenied{0};
-std::filesystem::path updatePrefsPath() { return appDataDir() / L"update.ini"; }
+std::filesystem::path dataFile(const wchar_t* name);
+std::filesystem::path updatePrefsPath() { return dataFile(L"update.ini"); }
 std::vector<ur::UserPreset> g_userPresets;
 std::filesystem::path g_presetPath;
 std::string g_activePreset;
@@ -967,7 +1006,8 @@ void showAbout() {
     s += "Scan on up to 16 workers. URL match hand-rolled, regex via std::regex.\r\n";
     s += "ASCII/ANSI/UTF-8, UTF-16, Base64, Hex.\r\n";
     s += "Reader from Akustikrausch's FXChainPlayer.\r\n";
-    s += "Portable workspace storage uses SQLite.\r\n\r\n";
+    s += "Settings and workspace: " + narrow(appDataDir().wstring().c_str()) +
+         (g_portable ? "  (next to the exe)\r\n\r\n" : "  (exe folder is read-only)\r\n\r\n");
     s += "Check for updates now?";
     if (MessageBoxW(g_main, widen(s).c_str(), L"About StringRipper",
                     MB_YESNO | MB_ICONINFORMATION) == IDYES)
@@ -1003,9 +1043,10 @@ uint32_t selectedPid() {
     int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
     return (sel >= 0 && sel < (int)g_procsView.size()) ? g_procsView[sel].pid : 0;
 }
-void selectPid(uint32_t pid) {
+bool selectPid(uint32_t pid) {
     for (int i = 0; i < (int)g_procsView.size(); ++i)
-        if (g_procsView[i].pid == pid) { SendMessageW(g_source, CB_SETCURSEL, i, 0); return; }
+        if (g_procsView[i].pid == pid) { SendMessageW(g_source, CB_SETCURSEL, i, 0); return true; }
+    return false;
 }
 
 void sortProcs() {
@@ -1457,8 +1498,11 @@ void doScan() {
     std::string source = pids.empty() ? "pid:" + std::to_string(pid) : "name:" + lower(procName);
     if (!paths.empty()) {
         std::vector<std::string> names;
-        for (const auto& p : paths)
-            names.push_back(narrow(std::filesystem::absolute(p).lexically_normal().wstring().c_str()));
+        for (const auto& p : paths) {
+            std::error_code ec;
+            auto absolute = std::filesystem::absolute(p, ec);
+            names.push_back(ur::pathUtf8((ec ? p : absolute).lexically_normal()));
+        }
         std::sort(names.begin(), names.end());
         source = "files:";
         for (const auto& n : names) source += std::to_string(n.size()) + ":" + n;
@@ -1509,19 +1553,47 @@ HWND g_ws = nullptr, g_wsSessions, g_wsName, g_wsJobs, g_wsFavorites, g_wsAdded,
 std::vector<ur::Session> g_wsIndex;
 std::vector<std::pair<std::string, std::string>> g_wsFavoriteIndex;
 
-std::filesystem::path appDataDir() {
+/* data lives next to the exe, so the folder is the whole install. A folder we
+   may not write to (Program Files) falls back to %LOCALAPPDATA%\StringRipper
+   under the old names. The first portable start copies old app-data files over
+   once and leaves the originals. */
+std::filesystem::path oldDataDir() {
     wchar_t base[32768]{};
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, 32768);
-    std::filesystem::path dir;
-    if (n && n < 32768) dir = std::filesystem::path(base) / L"StringRipper";
-    else {
+    return n && n < 32768 ? std::filesystem::path(base) / L"StringRipper" : std::filesystem::path();
+}
+bool writableDir(const std::filesystem::path& dir) {
+    auto probe = dir / (L"StringRipper.probe." + std::to_wstring(GetCurrentProcessId()));
+    HANDLE h = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                           FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    CloseHandle(h);
+    return true;
+}
+std::filesystem::path appDataDir() {
+    static const std::filesystem::path dir = [] {
         wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        dir = std::filesystem::path(exe).parent_path();
-    }
-    std::filesystem::create_directories(dir);
+        auto here = std::filesystem::path(exe).parent_path(), old = oldDataDir();
+        std::error_code ec;
+        if (writableDir(here)) {
+            g_portable = true;
+            for (auto [from, to] : {std::pair{L"workspace.sqlite", L"StringRipper.workspace.sqlite"},
+                                    std::pair{L"update.ini", L"StringRipper.update.ini"}})
+                if (!old.empty() && !std::filesystem::exists(here / to, ec) && std::filesystem::exists(old / from, ec))
+                    std::filesystem::copy_file(old / from, here / to, ec);
+            return here;
+        }
+        if (old.empty()) return here;
+        std::filesystem::create_directories(old, ec);
+        return old;
+    }();
     return dir;
 }
-std::filesystem::path workspaceDatabase() { return appDataDir() / L"workspace.sqlite"; }
+std::filesystem::path dataFile(const wchar_t* name) {
+    auto dir = appDataDir();
+    return g_portable ? dir / (std::wstring(L"StringRipper.") + name) : dir / name;
+}
+std::filesystem::path workspaceDatabase() { return dataFile(L"workspace.sqlite"); }
 
 void loadIgnoreRules() {
     try { ur::SessionStore db(workspaceDatabase()); g_ignoreLines = db.ignoreRules(); }
@@ -1723,7 +1795,10 @@ LRESULT CALLBACK WorkspaceProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 job.sources = g_chosenPaths;
                 if (job.sources.empty()) {
                     int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
-                    if (sel >= 0 && sel < (int)g_procsView.size()) job.pid = g_procsView[sel].pid;
+                    if (sel >= 0 && sel < (int)g_procsView.size()) {
+                        job.pid = g_procsView[sel].pid;
+                        job.processName = g_procsView[sel].name;
+                    }
                 }
                 if (!job.pid && job.sources.empty()) throw std::runtime_error("Choose a source first");
                 ur::SessionStore db(workspaceDatabase()); db.saveJob(job); wsRefresh();
@@ -1742,14 +1817,30 @@ LRESULT CALLBACK WorkspaceProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 g_fileSelection = job->files;
                 setChecked(g_monitor, job->monitorSeconds != 0);
                 SetWindowTextW(g_monitorInterval, std::to_wstring(job->monitorSeconds ? job->monitorSeconds : 5).c_str());
-                if (job->pid) { g_chosenPaths.clear(); selectPid(job->pid); }
-                else setSourcePaths(job->sources);
+                if (!job->sources.empty()) setSourcePaths(job->sources);
+                else if (!job->processName.empty()) {
+                    refreshProcesses();
+                    std::vector<std::pair<uint32_t, std::string>> active;
+                    for (const auto& process : g_procsAll) active.emplace_back(process.pid, process.name);
+                    const auto resolved = ur::resolveProcessJob(*job, active);
+                    if (!resolved)
+                        throw std::runtime_error("Process is not running: " + job->processName);
+                    g_chosenPaths.clear();
+                    SetWindowTextW(g_search, L""); applyProcFilter();
+                    if (!selectPid(*resolved)) throw std::runtime_error("Could not select process: " + job->processName);
+                } else if (job->pid) {
+                    throw std::runtime_error("Old process job has no process name; save it again");
+                } else throw std::runtime_error("Job has no source");
                 DestroyWindow(h);
                 PostMessageW(g_main, WM_COMMAND, ID_SCAN, 0);
             } else if (id == WS_ADD_FAVORITE) {
                 ur::SessionStore db(workspaceDatabase());
                 if (!g_chosenPaths.empty()) {
-                    for (const auto& path : g_chosenPaths) db.setFavorite("path", path.string(), true);
+                    for (const auto& path : g_chosenPaths) {
+                        const auto text = ur::pathUtf8(path);
+                        if (text.empty()) throw std::runtime_error("Cannot convert favorite path to UTF-8");
+                        db.setFavorite("path", text, true);
+                    }
                 } else {
                     int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
                     if (sel < 0 || sel >= (int)g_procsView.size())
@@ -1766,15 +1857,18 @@ LRESULT CALLBACK WorkspaceProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     ur::SessionStore db(workspaceDatabase());
                     db.setFavorite(kind, target, false); wsRefresh();
                 } else if (kind == "process") {
+                    refreshProcesses();
                     auto it = std::find_if(g_procsAll.begin(), g_procsAll.end(),
                         [&](const fxchain::RipProcess& p) { return p.name == target; });
                     if (it == g_procsAll.end()) throw std::runtime_error("Favorite process is not running");
-                    g_chosenPaths.clear(); selectPid(it->pid);
+                    SetWindowTextW(g_search, L""); applyProcFilter();
+                    if (!selectPid(it->pid)) throw std::runtime_error("Could not select favorite process");
+                    g_chosenPaths.clear();
                     DestroyWindow(h);
                 } else {
-                    auto path = std::filesystem::u8path(target);
-                    if (!std::filesystem::exists(path)) throw std::runtime_error("Favorite path no longer exists");
-                    setSourcePaths({path});
+                    auto path = ur::pathFromUtf8(target);
+                    if (!path || !std::filesystem::exists(*path)) throw std::runtime_error("Favorite path no longer exists");
+                    setSourcePaths({*path});
                     DestroyWindow(h);
                 }
             } else if (id == WS_CLOSE || id == IDCANCEL) DestroyWindow(h);
@@ -1974,7 +2068,7 @@ const ur::Finding* findingAtRow(int row) {
     }
     return nullptr;
 }
-void showFindingDetails(const ur::Finding& f) {
+void showFindingDetails(ur::Finding f) {
     std::wstring s = L"Value: " + widen(f.value) + L"\r\nGroup: " + widen(f.group) +
         L"\r\nEncoding: " + widen(ur::encName(f.enc)) + L"\r\nSource: " + widen(f.source);
     if (f.hasOffset) {
@@ -2048,7 +2142,8 @@ void inspectOffset(const ur::Finding& f, bool file) {
     uint64_t start = file && f.offset > 64 ? f.offset - 64 : f.offset;
     std::size_t got = 0;
     if (file) {
-        std::ifstream input(std::filesystem::u8path(f.source), std::ios::binary);
+        const auto path = ur::pathFromUtf8(f.source);
+        std::ifstream input(path ? *path : std::filesystem::path{}, std::ios::binary);
         if (input) {
             input.seekg(static_cast<std::streamoff>(start));
             input.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
@@ -2085,11 +2180,12 @@ void inspectOffset(const ur::Finding& f, bool file) {
     }
     showOffsetInspector(std::move(preview));
 }
-void showFindingMenu(const ur::Finding& f) {
+void showFindingMenu(ur::Finding f) {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, 1, L"Details and context");
     std::error_code ec;
-    bool file = std::filesystem::is_regular_file(std::filesystem::u8path(f.source), ec);
+    const auto path = ur::pathFromUtf8(f.source);
+    bool file = path && std::filesystem::is_regular_file(*path, ec);
     const uint32_t pid = file ? 0 : findingPid(f);
     const std::string process = pid ? fxchain::ripBackend().processName(pid) : std::string{};
     if (file) AppendMenuW(menu, MF_STRING, 2, L"Open source file");
@@ -2103,7 +2199,7 @@ void showFindingMenu(const ur::Finding& f) {
     int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, g_main, nullptr);
     DestroyMenu(menu);
     if (chosen == 1) showFindingDetails(f);
-    else if (chosen == 2 && file) ShellExecuteW(g_main, L"open", std::filesystem::u8path(f.source).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    else if (chosen == 2 && file) ShellExecuteW(g_main, L"open", path->c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     else if (chosen == 4) inspectOffset(f, file);
     else if (chosen == 3) {
         try { ur::SessionStore db(workspaceDatabase());
@@ -2330,6 +2426,7 @@ static const wchar_t* kUpdateManifestUrl =
 static const wchar_t* kReleasesPageUrl =
     L"https://github.com/akustikrausch/StringRipper/releases/latest";
 std::filesystem::path g_updateDownloadPath;
+std::atomic_bool g_updateCancel{false};
 
 static std::wstring updateUserAgent() { return L"StringRipper/" + widen(STRINGRIPPER_VERSION); }
 static void postUpdateError(const std::wstring& m) {
@@ -2343,7 +2440,7 @@ static void updateProgress(long long got, long long total, void*) {
 // Worker: fetch latest.json, decide. Only PostMessages back to the UI thread.
 void runUpdateCheck(bool manual) {
     std::string json, err;
-    if (!ur::httpGet(kUpdateManifestUrl, json, &err, 1 << 20, updateUserAgent())) {
+    if (!ur::httpGet(kUpdateManifestUrl, json, &err, 1 << 20, updateUserAgent(), nullptr, nullptr, &g_updateCancel)) {
         if (manual) postUpdateError(widen(err.empty() ? "update check failed" : err));
         return;
     }
@@ -2386,7 +2483,7 @@ void runUpdateCheck(bool manual) {
 void runUpdateDownload() {
     std::string bytes, err;
     if (!ur::httpGet(widen(g_update.url), bytes, &err, 500LL << 20, updateUserAgent(),
-                     updateProgress)) {
+                     updateProgress, nullptr, &g_updateCancel)) {
         postUpdateError(widen(err.empty() ? "download failed" : err));
         return;
     }
@@ -2409,12 +2506,15 @@ void startUpdateCheck(bool manual) {
     if (!g_updateBusy.compare_exchange_strong(expected, true)) return;
     g_updateManual = manual;
     if (g_updateThread.joinable()) g_updateThread.join();
+    g_updateCancel = false;
     g_updateThread = std::thread([manual]{ runUpdateCheck(manual); g_updateBusy = false; });
 }
 void startUpdateDownload() {
     bool expected = false;
     if (!g_updateBusy.compare_exchange_strong(expected, true)) return;
+    g_updateManual = true;
     if (g_updateThread.joinable()) g_updateThread.join();
+    g_updateCancel = false;
     g_updateThread = std::thread([]{ runUpdateDownload(); g_updateBusy = false; });
 }
 
@@ -2728,10 +2828,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_COPYDATA: {
         auto* cds = (COPYDATASTRUCT*)lp;
-        if (!cds || cds->dwData != kDropMagic || cds->cbData < sizeof(wchar_t)) break;
-        const wchar_t* p = (const wchar_t*)cds->lpData;
+        if (!cds || cds->dwData != kDropMagic) break;
+        const auto names = ur::parsePathHandoff(cds->lpData, cds->cbData);
         std::vector<std::filesystem::path> paths;
-        while (*p) { paths.emplace_back(p); p += wcslen(p) + 1; }
+        for (const auto& name : names) paths.emplace_back(name);
         if (!paths.empty() && !g_scanning) {
             setSourcePaths(std::move(paths));
             SetForegroundWindow(hwnd);
@@ -2825,7 +2925,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == 1) {
             if (g_updateThread.joinable()) g_updateThread.join();
             std::string err;
-            if (ur::selfReplace(g_updateDownloadPath, &err)) {
+            if (ur::selfReplace(g_updateDownloadPath, g_update.sha256, &err)) {
                 // Release the single-instance mutex first, or the relaunched
                 // exe collides with this still-closing one and bows out.
                 if (g_instanceMutex) { ReleaseMutex(g_instanceMutex); CloseHandle(g_instanceMutex); g_instanceMutex = nullptr; }
@@ -2850,9 +2950,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_DESTROY:
         g_cancelFlag = true;
+        g_updateCancel = true;
         g_scanGate.setPaused(false);
         if (g_scanThread.joinable()) g_scanThread.join();
         if (g_updateThread.joinable()) g_updateThread.join();
+        if (!g_updateDownloadPath.empty()) {
+            std::error_code ec; std::filesystem::remove(g_updateDownloadPath, ec);
+        }
         { MSG pending{};
           while (PeekMessageW(&pending, hwnd, WM_APP_UPDATE_DONE, WM_APP_UPDATE_DONE, PM_REMOVE))
               if (pending.wParam == 0) free((wchar_t*)pending.lParam); }
@@ -2949,7 +3053,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, LPWSTR, int) {
     /* one GUI instance: a second launch hands its dropped paths to the first
        and bows out, so scans never race each other. */
     HANDLE mtx = CreateMutexW(nullptr, TRUE, L"StringRipper.SingleInstance.v1");
-    if (mtx && GetLastError() == ERROR_ALREADY_EXISTS) {
+    const DWORD mutexError = GetLastError();
+    if (mutexError == ERROR_ALREADY_EXISTS || (!mtx && mutexError == ERROR_ACCESS_DENIED)) {
         HWND ex = FindWindowW(L"StringRipperWindow", nullptr);
         if (ex) {
             if (IsIconic(ex)) ShowWindow(ex, SW_RESTORE);

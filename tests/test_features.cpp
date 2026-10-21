@@ -1,11 +1,58 @@
 #include "../src/result_tools.hpp"
 #include "../src/regex_presets.hpp"
+#include "../src/pe_sections.hpp"
+#include "../src/path_handoff.hpp"
+#include "../src/update_validation.hpp"
+#include "../src/cli_args.hpp"
 #include <cstdio>
 
 static int failures = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++failures; } } while (0)
 
-int main() {
+int main(int argc, char** argv) {
+    CHECK(ur::cliNumber("010") == 10 && ur::cliNumber("0x10") == 16);
+    if (argc > 1 && std::string(argv[1]) == "--invalid-json") {
+        ur::Finding finding{};
+        finding.value = "https://valid.example.com/x";
+        finding.before = std::string("\xFC", 1);
+        ur::Group group{"valid.example.com", {finding}};
+        const auto json = ur::exportResults({group}, "json");
+        std::fwrite(json.data(), 1, json.size(), stdout);
+        return 0;
+    }
+    CHECK(ur::validUpdateVersion("1.2.7") && !ur::validUpdateVersion("99.0.0\\..\\x") &&
+          !ur::validUpdateVersion("1..2") && !ur::validUpdateVersion("1\n2"));
+    CHECK(ur::validUpdateNotes("https://example.com/notes") &&
+          !ur::validUpdateNotes("file:///notes") && !ur::validUpdateNotes("https://example.com\nother"));
+    CHECK(ur::settingLine("first\r\nsecond") == "first  second");
+    {
+        const wchar_t good[] = {L'o', L'n', L'e', 0, L't', L'w', L'o', 0, 0};
+        auto paths = ur::parsePathHandoff(good, sizeof(good));
+        CHECK(paths.size() == 2 && paths[0] == L"one" && paths[1] == L"two");
+        CHECK(ur::parsePathHandoff(good, sizeof(wchar_t)).empty());
+        CHECK(ur::parsePathHandoff(good, sizeof(good) - 1).empty());
+        CHECK(ur::parsePathHandoff(good, sizeof(good) - sizeof(wchar_t)).empty());
+    }
+    {
+        std::vector<uint8_t> h(4096);
+        h[0] = 'M'; h[1] = 'Z';
+        for (uint32_t pe : {0u, 0xF00u, 0xFFFFFFF0u}) {
+            std::memcpy(h.data() + 0x3C, &pe, 4);
+            CHECK(ur::parsePeSections(h.data(), h.size()).empty());
+        }
+        const uint32_t pe = 0xF00, va = 0x1000, size = 0x10, align = 0x1000;
+        const uint16_t count = 1;
+        std::memcpy(h.data() + 0x3C, &pe, 4);
+        std::memcpy(h.data() + pe, "PE\0\0", 4);
+        std::memcpy(h.data() + pe + 6, &count, 2);
+        std::memcpy(h.data() + pe + 56, &align, 4);
+        std::memcpy(h.data() + pe + 24, ".t\x01" "ext", 6);
+        std::memcpy(h.data() + pe + 32, &size, 4);
+        std::memcpy(h.data() + pe + 36, &va, 4);
+        const auto sections = ur::parsePeSections(h.data(), h.size());
+        CHECK(sections.size() == 1 && std::get<0>(sections[0]) == ".text" &&
+              std::get<1>(sections[0]) == va && std::get<2>(sections[0]) == 0x2000);
+    }
     ur::Group a{"Tickets", {{"TKT-123456", ur::Enc::Ascii, "before", "Tickets"}}};
     ur::Group b{"Tickets", {{"TKT-123456", ur::Enc::Utf16, "moved", "Tickets"},
                            {"TKT-654321", ur::Enc::Ascii, "after", "Tickets"}}};
@@ -27,7 +74,10 @@ int main() {
     CHECK(key != ur::comparisonContext("file", o));
     CHECK(key != ur::comparisonContext("other", ur::Options{}));
     CHECK(ur::jsonString("\"\\\n\t") == "\"\\\"\\\\\\u000a\\u0009\"");
+    CHECK(ur::jsonString(std::string("\xFC", 1)) == "\"\\u00fc\"");
+    CHECK(ur::jsonString(std::string("\xC3\xBC", 2)) == std::string("\"\xC3\xBC\"", 4));
     CHECK(ur::csvField("a,\"b\"\r\n") == "\"a,\"\"b\"\"\r\n\"");
+    CHECK(ur::csvField(std::string("a\0b", 3)) == "\"a\\0b\"");
     // Regression: csv cells starting with = + - @ or tab ran as formulas
     CHECK(ur::csvField("=cmd|'/c calc'!A1") == "\"'=cmd|'/c calc'!A1\"");
     CHECK(ur::csvField("+1-1") == "\"'+1-1\"");
@@ -100,14 +150,23 @@ int main() {
         std::vector<ur::Group> groups{dl, tie};
         CHECK(ur::resolveDownloadHosts(groups) == 3);
         const auto& r = groups[0].items;
-        CHECK(r[2].value == "https://g1.ikmultimedia.com/plugins/AmpliTube5/AmpliTube_5_10_9.zip");
-        CHECK(r[2].captures.size() == 2 && r[2].captures[0].second == "/plugins/AmpliTube5/AmpliTube_5_10_9.zip" &&
-              r[2].captures[1].second == "https://g1.ikmultimedia.com/plugins/AmpliTube5/AmpliTube_5_10_8.zip");
-        CHECK(r[3].value == "https://g1.ikmultimedia.com/plugins/TONEX/TONEX_1_2.zip");
-        CHECK(r[4].value == "https://g1.ikmultimedia.com/plugins/x.dmg");
-        CHECK(r[5].value == "/nowhere/else.pkg" && r[5].captures.empty());       // no shared directory
-        CHECK(r[6].value == "/plugins/AmpliTube5/other.zip");                    // other source
-        CHECK(r[7].value == "setup.exe");                                        // no path at all
+        auto find = [&](const std::string& value) -> const ur::Finding* {
+            auto it = std::find_if(r.begin(), r.end(), [&](const ur::Finding& f) { return f.value == value; });
+            return it == r.end() ? nullptr : &*it;
+        };
+        const auto* resolvedHit = find("https://g1.ikmultimedia.com/plugins/AmpliTube5/AmpliTube_5_10_9.zip");
+        CHECK(resolvedHit && resolvedHit->captures.size() == 2 &&
+              resolvedHit->captures[0].second == "/plugins/AmpliTube5/AmpliTube_5_10_9.zip" &&
+              resolvedHit->captures[1].second == "https://g1.ikmultimedia.com/plugins/AmpliTube5/AmpliTube_5_10_8.zip");
+        CHECK(find("https://g1.ikmultimedia.com/plugins/TONEX/TONEX_1_2.zip"));
+        CHECK(find("https://g1.ikmultimedia.com/plugins/x.dmg"));
+        const auto* unresolved = find("/nowhere/else.pkg");
+        CHECK(unresolved && unresolved->captures.empty());
+        CHECK(find("/plugins/AmpliTube5/other.zip"));
+        CHECK(find("setup.exe"));
+        CHECK(std::is_sorted(r.begin(), r.end(), [](const ur::Finding& a, const ur::Finding& b) {
+            return a.value > b.value;
+        }));
         CHECK(groups[1].items[2].value == "/d/3.zip");                           // two hosts tied
     }
     return failures ? 1 : 0;

@@ -4,19 +4,20 @@ Small Windows tool for ripping strings out of running processes, files or whole 
 
 Give it a process and it digs through readable memory looking for URLs or whatever regex you throw at it. Works with ASCII/ANSI/UTF-8, UTF-16 LE/BE and also unwraps one layer of Base64, hex or escaping along the way. So `https:\/\/`, `https%3A%2F%2F` and `\u002F` from JSON blobs and query strings come out as plain URLs.
 
-Umlauts and other non-ASCII letters stay inside the string, `C:\Users\Jürgen\...` comes out whole instead of cut at the ü. UTF-8, ANSI and UTF-16 alike. A lone non-ASCII word with nothing ASCII around it is still missed, that keeps random memory from turning into fake text.
+Umlauts and other non-ASCII letters stay inside the string, `C:\Users\Jürgen\...` comes out whole instead of cut at the ü. UTF-8, ANSI and UTF-16 alike. Same in URLs: a path like `/ufs/Pulsación.rar` keeps its `ó`, also in the Download preset. Host names stay ASCII. A lone non-ASCII word with nothing ASCII around it is still missed, that keeps random memory from turning into fake text.
 
 **All instances** scans every process with the selected name in one go. Browsers like to spawn twenty of them. Each hit then says which pid it came from.
 
 Memory hits also say where they sat: `xul.dll .rdata`, `mapped foo.dat`, `stack`, `heap` or `private`. It's part of the source, so the filter box finds them. `heap` means the process heaps' base segments, everything else unnamed stays `private`.
 
-One portable exe. No installer, no DLL mess.
+One portable exe. No installer, no DLL mess. Really portable: workspace, update settings and presets sit next to the exe (`StringRipper.workspace.sqlite`, `StringRipper.update.ini`, `regex-user-presets.ini`), so the folder is the whole install. Copy it to a stick and everything comes along. In a folder you can't write to (Program Files) it falls back to `%LOCALAPPDATA%\StringRipper`, About tells you which. Coming from 1.2.x, the old data is copied over once on first start, the originals stay where they were.
 
-It checks GitHub for a newer version on startup (you get asked once, on first run) and can download and install it in place. Your presets and saved scans are kept. The check is off if you say no; a manual one sits behind the About button.
+It checks GitHub for a newer version on startup (you get asked once, on first run) and can download and install it in place, even from another drive. Your presets and saved scans are kept. The check is off if you say no; a manual one sits behind the About button. Closing the window cancels an update in progress.
 
-Dedups overlap windows (hits from different sources stay separate), groups by domain or pattern, sorts Z-A.
+Read-window overlap keeps a hit whole instead of adding a cut-off twin. Hits from different sources stay separate; groups sort Z-A.
 
 URL mode knows http/https, ftp, ws, rtsp, rtmp, mms, udp etc. I made the URL detector a bit picky on purpose. The host has to look real, so random memory garbage containing `://` doesn't flood the results.
+Long text runs are searched too; URL schemes survive stray prefix letters, encoded URLs inside redirect links are found, and UTF-16 is read at either byte alignment.
 
 Regex mode has presets for the usual stuff: email, IPv4/IPv6, GUIDs, API keys, file paths, download URLs... or give it your own ECMAScript regex.
 
@@ -48,7 +49,7 @@ Custom=1
 
 ## Workspace
 
-**Workspace...** keeps scan sessions in a local SQLite file (`%LOCALAPPDATA%\StringRipper\workspace.sqlite`), compares two sessions side by side (added, removed, unchanged) and saves named jobs: sources, profile, file filter, live interval. Favorite processes and paths live there too, and so does the ignore list. **Dashboard** counts findings by pattern, source and encoding. Nothing leaves your machine.
+**Workspace...** keeps scan sessions in a local SQLite file (`StringRipper.workspace.sqlite` next to the exe), compares two sessions side by side (added, removed, unchanged) and saves named jobs: sources, profile, file filter, live interval. Process jobs follow the program name across restarts; old PID-only jobs need to be saved again. Favorite processes and paths live there too, and so does the ignore list. **Dashboard** counts findings by pattern, source and encoding. Nothing leaves your machine.
 
 Direct ASCII/UTF-16 hits and unescaped ones carry their file offset or memory address, a bit of context and named captures like `(?<version>...)`. Double-click a hit for details, right-click to inspect the bytes, open the source file or favorite the source. Decoded Base64/hex hits don't claim an offset.
 
@@ -76,6 +77,7 @@ Regex scans run in overlapping 1024-char windows. Hits over 512 chars aren't ret
 ## Export
 
 **Export...** writes TXT, CSV, JSON or appends a SQLite session, and only what the filter currently shows. Paging is display only. CSV/JSON carry offsets, context and captures. CSV cells starting with `=`, `+`, `-` or `@` get a leading quote so Excel doesn't run them.
+Invalid bytes are escaped in JSON and NUL bytes in CSV; console output keeps the same bytes as a saved export.
 
 Findings stay plain text. No clickable URLs. `Export...` and `Send to editor` write straight to disk and never touch the clipboard. This is intentional... some download managers love watching the clipboard and immediately grabbing every URL they see. `Copy selected` is the only thing that puts anything there.
 
@@ -140,9 +142,9 @@ CLI works too:
 
 ```text
 StringRipper.exe --pid 4821
-StringRipper.exe --name firefox.exe --ignore mozilla.org   # every instance, minus the noise
-StringRipper.exe --file game.exe --preset email,apikey
-StringRipper.exe --folder .\dump --regex "\bAKIA[0-9A-Z]{16}\b" --out keys.txt
+StringRipper.exe --name app.exe --ignore example.org   # every instance, minus the noise
+StringRipper.exe --file sample.bin --preset email,apikey
+StringRipper.exe --folder .\dump --regex "\bTKT-[0-9]{6}\b" --out tickets.txt
 StringRipper.exe --file setup.bin --preset fileurl        # download URLs
 StringRipper.exe --folder .\dump --scheme https --no-crap  # keep every host
 StringRipper.exe --help
@@ -159,6 +161,7 @@ StringRipper.exe --file log.txt --presets-file C:\Tools\regex-user-presets.ini -
 Also: `--no-escaped`, `--ignore`, `--include`, `--exclude`, size/date/range filters, `--db`, `--save-session`, `--open-session`, `--compare-sessions`, `--save-job`, `--run-job`, `--list-jobs`, `--favorite`, `--favorites` and `--format sqlite`. Repeat `--user-preset` to stack patterns. Dates are Unix seconds, ranges take decimal or `0x` hex with an exclusive end. Explicit regex/decoder switches beat the preset, whatever the order.
 
 Without `--presets-file` it reads `regex-user-presets.ini` next to the executable, not from the working directory. Exit code 0 hits, 1 no hits, 2 error (bad file, unknown preset name...).
+Both CLIs reject unknown presets, schemes, missing inputs, invalid numbers and `--regex` mixed with `--preset` with exit code 2; numbers are decimal unless prefixed with `0x`.
 
 Reading a higher-integrity process needs an elevated StringRipper. Windows being Windows :) Drag and drop keeps working when it runs elevated, the drop messages are let through on purpose.
 

@@ -1,5 +1,30 @@
 file(WRITE "${WORK}/feature-input.txt" "TKT-123456\nTKT-654321\nnot a ticket\n")
 set(presets "${SOURCE}/regex-user-presets.ini")
+execute_process(COMMAND "${CLI}" --file "${WORK}/feature-input.txt" --preset email,emial
+  RESULT_VARIABLE rc ERROR_VARIABLE err)
+if(NOT rc EQUAL 2 OR NOT err MATCHES "emial")
+  message(FATAL_ERROR "Unknown preset ID must fail with its name: ${rc} ${err}")
+endif()
+execute_process(COMMAND "${CLI}" --file "${WORK}/feature-input.txt" --file "${WORK}/missing.bin"
+  RESULT_VARIABLE rc ERROR_VARIABLE err)
+if(NOT rc EQUAL 2 OR NOT err MATCHES "missing.bin")
+  message(FATAL_ERROR "Missing input beside a valid input must fail: ${rc} ${err}")
+endif()
+execute_process(COMMAND "${CLI}" --file "${WORK}/feature-input.txt" --min-size -1
+  RESULT_VARIABLE rc ERROR_VARIABLE err)
+if(NOT rc EQUAL 2 OR NOT err MATCHES "invalid number")
+  message(FATAL_ERROR "Negative size must fail: ${rc} ${err}")
+endif()
+execute_process(COMMAND "${CLI}" --file "${WORK}/feature-input.txt" --regex TKT --preset email
+  RESULT_VARIABLE rc ERROR_VARIABLE err)
+if(NOT rc EQUAL 2 OR NOT err MATCHES "cannot be combined")
+  message(FATAL_ERROR "Regex and preset together must fail: ${rc} ${err}")
+endif()
+execute_process(COMMAND "${CLI}" --file "${WORK}/feature-input.txt" --scheme HTTTP
+  RESULT_VARIABLE rc ERROR_VARIABLE err)
+if(NOT rc EQUAL 2 OR NOT err MATCHES "HTTTP|htttp")
+  message(FATAL_ERROR "Unknown scheme must fail: ${rc} ${err}")
+endif()
 execute_process(COMMAND "${CLI}" --list-user-presets --presets-file "${presets}"
   RESULT_VARIABLE rc OUTPUT_VARIABLE names ERROR_VARIABLE err)
 if(NOT rc EQUAL 0 OR NOT names MATCHES "Support ticket IDs" OR NOT names MATCHES "Semantic versions")
@@ -42,6 +67,14 @@ file(READ "${WORK}/feature-output.csv" csv)
 if(NOT rc EQUAL 0 OR NOT csv MATCHES "group,value,encoding,source" OR NOT csv MATCHES "TKT-123456")
   message(FATAL_ERROR "CSV export failed: ${err}")
 endif()
+execute_process(COMMAND "${CLI}" --file "${WORK}/feature-input.txt"
+  --user-preset "Support ticket IDs" --presets-file "${presets}" --format csv
+  RESULT_VARIABLE rc OUTPUT_FILE "${WORK}/feature-stdout.csv" ERROR_VARIABLE err)
+file(SHA256 "${WORK}/feature-stdout.csv" consoleHash)
+file(SHA256 "${WORK}/feature-output.csv" fileHash)
+if(NOT rc EQUAL 0 OR NOT consoleHash STREQUAL fileHash)
+  message(FATAL_ERROR "Console and --out CSV differ: ${err}")
+endif()
 file(REMOVE "${WORK}/feature-sessions.sqlite")
 execute_process(COMMAND "${CLI}" --file "${WORK}/feature-input.txt"
   --user-preset "Support ticket IDs" --presets-file "${presets}"
@@ -79,6 +112,11 @@ if(NOT rc EQUAL 0 OR NOT combined MATCHES "Support ticket IDs")
 endif()
 
 file(WRITE "${WORK}/escaped-input.txt" "cfg={\"u\":\"https:\\/\\/cdn.example.com\\/app.zip\"}\nplain https://keep.example.org/x\n")
+execute_process(COMMAND "${CLI}" --file "${WORK}/escaped-input.txt" --scheme HTTPS --format json
+  RESULT_VARIABLE rc OUTPUT_VARIABLE schemeOutput ERROR_VARIABLE err)
+if(NOT rc EQUAL 0 OR NOT schemeOutput MATCHES "keep.example.org")
+  message(FATAL_ERROR "Uppercase scheme must match: ${rc} ${err}")
+endif()
 execute_process(COMMAND "${CLI}" --file "${WORK}/escaped-input.txt" --format json
   RESULT_VARIABLE rc OUTPUT_VARIABLE output ERROR_VARIABLE err)
 if(NOT rc EQUAL 0 OR NOT output MATCHES "https://cdn.example.com/app.zip" OR NOT output MATCHES "\"Escaped\"")
@@ -100,4 +138,17 @@ execute_process(COMMAND "${CLI}" --file "${WORK}/download-input.txt" --preset fi
   RESULT_VARIABLE rc OUTPUT_VARIABLE output ERROR_VARIABLE err)
 if(NOT rc EQUAL 0 OR NOT output MATCHES "https://g1.ikmultimedia.com/plugins/AmpliTube5/AmpliTube_5_10_9.zip")
   message(FATAL_ERROR "Partial download path did not get its host: ${rc} ${err} ${output}")
+endif()
+file(WRITE "${WORK}/accent-input.txt" "x https://cdn.example.com/files/1.0.0/ufs/Base.rar y\n\"/files/1.0.0/ufs/Pulsación.rar\"\nz https://cdn.example.com/files/1.0.0/ufs/Pulsación.rar\n")
+execute_process(COMMAND "${CLI}" --file "${WORK}/accent-input.txt" --preset fileurl
+  RESULT_VARIABLE rc OUTPUT_VARIABLE output ERROR_VARIABLE err)
+string(REGEX MATCHALL "https://cdn.example.com/files/1.0.0/ufs/Pulsación.rar" full "${output}")
+list(LENGTH full count)
+if(NOT rc EQUAL 0 OR NOT count EQUAL 2)
+  message(FATAL_ERROR "Accented download path lost letters or its host: ${rc} ${err} ${output}")
+endif()
+execute_process(COMMAND "${CLI}" --file "${WORK}/accent-input.txt"
+  RESULT_VARIABLE rc OUTPUT_VARIABLE output ERROR_VARIABLE err)
+if(NOT rc EQUAL 0 OR NOT output MATCHES "https://cdn.example.com/files/1.0.0/ufs/Pulsación.rar")
+  message(FATAL_ERROR "Accented URL cut in URL mode: ${rc} ${err} ${output}")
 endif()

@@ -106,6 +106,38 @@ int main() {
         CHECK(hasGroup(g, "real.example.com"), "valid host kept");
         CHECK(g.size() == 2, "only the two valid hosts");
     }
+    {
+        ur::Options o; o.base64 = o.hex = o.utf16 = false;
+        ur::Detector det(o);
+        for (char prefix : {'x', '7'}) {
+            const std::string data = std::string(1, prefix) + "https://real-host.com/abc";
+            ur::Sink sink;
+            det.scan(reinterpret_cast<const uint8_t*>(data.data()), data.size(), "prefix", sink, 100, true);
+            CHECK(sink.items.size() == 1 && sink.items[0].value == "https://real-host.com/abc" &&
+                  sink.items[0].offset == 101, "known scheme suffix survives letter or digit prefix");
+        }
+    }
+    {
+        ur::Options o; o.base64 = o.hex = o.utf16 = o.escaped = false;
+        ur::Detector det(o);
+        const std::string url = "https://long.example.com/path";
+        for (std::size_t count : {9000u, 100000u}) {
+            std::string data(count, 'x');
+            data += url;
+            data += ' ';
+            ur::Sink sink;
+            det.scan(reinterpret_cast<const uint8_t*>(data.data()), data.size(), "long", sink, 100, true);
+            CHECK(sink.items.size() == 1 && sink.items[0].value == url &&
+                  sink.items[0].offset == 100 + count, "long run retains URL and exact offset");
+        }
+        std::string boundary(16380, 'x');
+        boundary += url;
+        boundary += ' ';
+        ur::Sink sink;
+        det.scan(reinterpret_cast<const uint8_t*>(boundary.data()), boundary.size(), "boundary", sink, 0, true);
+        CHECK(sink.items.size() == 1 && sink.items[0].value == url &&
+              sink.items[0].offset == 16380, "slice overlap retains boundary URL once");
+    }
 
     // Regex mode: email + AWS key
     {
@@ -113,6 +145,33 @@ int main() {
         auto g = run(o, buf);
         CHECK(hasValue(g, "telemetry@mail.example.com"), "regex email match");
         CHECK(hasValue(g, "AKIA1234567890ABCDEF"), "regex aws key match");
+    }
+
+    {
+        ur::Options o; o.base64 = o.hex = o.utf16 = false;
+        ur::Detector det(o); ur::Sink sink;
+        const std::string tail = "https://example-cdn.co";
+        det.scan(reinterpret_cast<const uint8_t*>(tail.data()), tail.size(), "tail", sink, 0, true, false, true);
+        CHECK(sink.items.empty(), "cut tail does not emit shortened URL");
+        det.scan(reinterpret_cast<const uint8_t*>(tail.data()), tail.size(), "whole", sink);
+        CHECK(sink.items.size() == 1, "true end of data can emit URL");
+
+        o.mode = ur::Mode::Regex; o.presets = {"email"};
+        ur::Detector email(o); ur::Sink head;
+        const std::string cut = "al@example.com";
+        email.scan(reinterpret_cast<const uint8_t*>(cut.data()), cut.size(), "head", head, 0, true, true, false);
+        CHECK(head.items.empty(), "cut head does not emit shortened email");
+        email.scan(reinterpret_cast<const uint8_t*>(cut.data()), cut.size(), "whole", head);
+        CHECK(head.items.size() == 1, "true start of data can emit email");
+
+        o.mode = ur::Mode::Urls; o.ascii = false; o.hex = true;
+        ur::Detector decoded(o); ur::Sink encoded;
+        const std::string partial = hex("https://example-cdn.co");
+        decoded.scan(reinterpret_cast<const uint8_t*>(partial.data()), partial.size(), "hex-tail",
+                     encoded, 0, true, false, true);
+        CHECK(encoded.items.empty(), "cut hex tail does not emit shortened URL");
+        decoded.scan(reinterpret_cast<const uint8_t*>(partial.data()), partial.size(), "hex-whole", encoded);
+        CHECK(encoded.items.size() == 1, "complete hex run can emit URL");
     }
 
     // De-dup: same URL twice -> one finding
@@ -218,6 +277,20 @@ int main() {
         det.scan(reinterpret_cast<const uint8_t*>(data.data()), data.size(), "long-value", sink);
         CHECK(sink.items.empty(), "oversize match does not emit a truncated suffix");
     }
+    {
+        ur::Options o; o.mode = ur::Mode::Regex; o.customRegex = "[A-Z]{20}";
+        std::string data(1200, 'A');
+        ur::Detector det(o); ur::Sink sink;
+        det.scan(reinterpret_cast<const uint8_t*>(data.data()), data.size(), "tokens", sink, 100, true);
+        bool aligned = sink.items.size() == 60;
+        for (std::size_t i = 0; i < sink.items.size(); ++i)
+            aligned &= sink.items[i].offset == 100 + i * 20;
+        CHECK(aligned, "regex windows keep 60 adjacent tokens aligned");
+        o.customRegex = "A+"; ur::Detector longMatch(o); ur::Sink longSink;
+        data.resize(600);
+        longMatch.scan(reinterpret_cast<const uint8_t*>(data.data()), data.size(), "long", longSink);
+        CHECK(longSink.items.empty(), "600-character match does not become a 512-character piece");
+    }
 #ifdef __GLIBCXX__
     {
         bool rejected = false;
@@ -261,6 +334,44 @@ int main() {
         CHECK(ok, "named group still parses after the lookbehind fix");
     }
 
+    // UTF-16 after a zero byte: one hit, at the LE offset, not a BE twin one byte earlier
+    {
+        std::vector<uint8_t> w; w.push_back(0); w.push_back(0);
+        for (char c : std::string("https://cdn.example.com/plain/file.rar")) { w.push_back((uint8_t)c); w.push_back(0); }
+        w.push_back(0); w.push_back(0);
+        ur::Options url;
+        auto g = run(url, w);
+        CHECK(ur::countFindings(g) == 1 && g[0].items[0].offset == 2, "UTF-16 LE after a zero byte reported once, at its own offset");
+        std::vector<uint8_t> odd; odd.push_back(7);
+        for (char c : std::string("https://cdn.example.com/odd/file.rar")) { odd.push_back(0); odd.push_back((uint8_t)c); }
+        odd.push_back(0); odd.push_back(0);
+        auto gb = run(url, odd);
+        CHECK(ur::countFindings(gb) == 1, "UTF-16 BE at an odd offset reported once");
+    }
+    // letters of other languages stay in a URL path; host stays ASCII
+    {
+        auto bytes = [](const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); };
+        const std::string want = "https://cdn.example.com/files/1.0.0/ufs/Pulsaci\xC3\xB3n.rar";
+        ur::Options url;
+        CHECK(hasValue(run(url, bytes("\x01" + want + "\x01")), want), "UTF-8 accented URL path kept whole");
+        CHECK(hasValue(run(url, bytes("\x01https://cdn.example.com/files/1.0.0/ufs/Pulsaci\xF3n.rar\x01")), want),
+              "ANSI accented URL path kept whole, as UTF-8");
+        std::vector<uint8_t> w; w.push_back(0); w.push_back(0);
+        for (unsigned char c : std::string("https://cdn.example.com/files/1.0.0/ufs/Pulsaci\xF3n.rar")) { w.push_back(c); w.push_back(0); }
+        w.push_back(0); w.push_back(0);
+        CHECK(hasValue(run(url, w), want), "UTF-16 accented URL path kept whole");
+        const std::string cyr = "https://cdn.example.com/\xD1\x84\xD0\xB0\xD0\xB9\xD0\xBB/\xD0\xB4\xD0\xBE\xD0\xBA.pdf";
+        CHECK(hasValue(run(url, bytes("\x01see " + cyr + " now\x01")), cyr), "Cyrillic UTF-8 path kept whole");
+        const std::string quoted = "https://cdn.example.com/Gr\xC3\xB6\xC3\x9F" "e.zip";
+        CHECK(hasValue(run(url, bytes("\x01\xE2\x80\x9C" + quoted + "\xE2\x80\x9D and more\x01")), quoted),
+              "curly quote ends the URL");
+        CHECK(!hasGroup(run(url, bytes("\x01https://b\xC3\xBC" "cher.example/x\x01")), "b\xC3\xBC" "cher.example"),
+              "non-ASCII host is not reported");
+        ur::Options dl; dl.mode = ur::Mode::Regex; dl.presets = {"fileurl"};
+        CHECK(hasValue(run(dl, bytes("\x01/files/1.0.0/ufs/Pulsaci\xC3\xB3n.rar\x01")), "/files/1.0.0/ufs/Pulsaci\xC3\xB3n.rar"),
+              "download preset keeps an accented file name");
+        CHECK(hasValue(run(dl, bytes("\x01" + want + "\x01")), want), "download preset keeps an accented full URL");
+    }
     // umlauts: UTF-8, ANSI (cp1252) and UTF-16 keep the whole path, offsets stay exact
     {
         auto one = [](const std::vector<ur::Group>& g, const std::string& v) -> const ur::Finding* {
@@ -329,6 +440,14 @@ int main() {
         auto plain = run(o, bytes("\x01https://p.example.com/my%20file.zip\x01"));
         CHECK(ur::countFindings(plain) == 1, "plain URL with %20 in the path is not reported twice");
 
+        const std::string nested = "\x01https://outer.example.com/go?next=https%3A%2F%2Finner.example.org%2Fx\x01";
+        auto nestedHits = run(o, bytes(nested));
+        CHECK(only(nestedHits, "https://outer.example.com/go?next=https%3A%2F%2Finner.example.org%2Fx"),
+              "outer URL with encoded redirect found once");
+        auto* inner = only(nestedHits, "https://inner.example.org/x");
+        CHECK(inner && inner->enc == ur::Enc::Escaped && inner->offset == nested.find("https%3A"),
+              "nested encoded URL found with exact offset");
+
         ur::Options off; off.escaped = false;
         CHECK(!hasGroup(run(off, bytes(json)), "cdn.example.com"), "Escaped decoder off: JSON-escaped URL not found");
 
@@ -338,6 +457,20 @@ int main() {
         w.push_back(0); w.push_back(0);
         auto* fw = only(run(o, w), "https://w.example.com/z");
         CHECK(fw && fw->offset == 2, "JSON-escaped URL in UTF-16 found, exact offset");
+
+        for (bool le : {true, false}) {
+            std::vector<uint8_t> odd = {0, 0, 0xFF};
+            const std::string url = "https://odd.example.com/path";
+            for (unsigned char c : url) {
+                odd.push_back(le ? c : 0);
+                odd.push_back(le ? 0 : c);
+            }
+            odd.insert(odd.end(), {0xFF, 0xFF});
+            auto oddHits = run(o, odd);
+            auto* hit = only(oddHits, url);
+            CHECK(hit && hit->enc == ur::Enc::Utf16 && hit->offset == 3,
+                  le ? "odd-offset UTF-16 LE URL keeps byte offset" : "odd-offset UTF-16 BE URL keeps byte offset");
+        }
 
         ur::Options mail; mail.mode = ur::Mode::Regex; mail.presets = {"email"};
         CHECK(only(run(mail, bytes("\x01to=user%40mail.example.com&x=1\x01")), "user@mail.example.com"),
