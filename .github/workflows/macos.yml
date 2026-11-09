@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14          # Apple Silicon runner; its SDK builds both slices
+    runs-on: macos-15          # Apple Silicon runner; its SDK builds both slices
     steps:
       - uses: actions/checkout@v4
       - name: Build universal CLI

@@ -82,7 +82,7 @@ xattr -dr com.apple.quarantine dist/mac/stringripper   # unsigned: clear Gatekee
 ## Building remotely instead (GitHub Actions)
 
 `.github/workflows/macos.yml` builds the universal CLI on a GitHub-hosted
-`macos-14` (Apple Silicon) runner, smoke-tests it, and uploads
+`macos-15` (Apple Silicon) runner, smoke-tests it, and uploads
 `stringripper-macos` as an artifact. Trigger it from the Actions tab
 ("Run workflow") or by pushing a `v*` tag. Download the artifact from the run.
 This needs no local Mac at all and is the easiest path if you would rather not
