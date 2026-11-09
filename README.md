@@ -10,11 +10,11 @@ Umlauts and other non-ASCII letters stay inside the string, `C:\Users\Jürgen\..
 
 Memory hits also say where they sat: `xul.dll .rdata`, `mapped foo.dat`, `stack`, `heap` or `private`. It's part of the source, so the filter box finds them. `heap` means the process heaps' base segments, everything else unnamed stays `private`.
 
-One portable exe. No installer, no DLL mess. Really portable: workspace, update settings and presets sit next to the exe (`StringRipper.workspace.sqlite`, `StringRipper.update.ini`, `regex-user-presets.ini`), so the folder is the whole install. Copy it to a stick and everything comes along. In a folder you can't write to (Program Files) it falls back to `%LOCALAPPDATA%\StringRipper`, About tells you which. Coming from 1.2.x, the old data is copied over once on first start, the originals stay where they were.
+One portable exe. No installer, no DLL mess. Really portable: workspace, update settings and presets live in a `data` folder next to the exe (`workspace.sqlite`, `update.ini`, `regex-user-presets.ini`), so the folder is the whole install. Copy it to a stick and everything comes along. In a folder you can't write to (Program Files) it uses `%LOCALAPPDATA%\StringRipper\data`, About tells you which. Older layouts move in on first start: the 1.3.0 files next to the exe and a dropped-in `regex-user-presets.ini` go into `data`, 1.2.x app data is copied once.
 
 It checks GitHub for a newer version on startup (you get asked once, on first run) and can download and install it in place, even from another drive. Your presets and saved scans are kept. The check is off if you say no; a manual one sits behind the About button. Closing the window cancels an update in progress.
 
-Read-window overlap keeps a hit whole instead of adding a cut-off twin. Hits from different sources stay separate; groups sort Z-A.
+Read-window overlap keeps a hit whole instead of adding a cut-off twin. Hits from different sources stay separate (the GUI list folds repeats of a value into one row, exports keep them all); groups sort Z-A.
 
 URL mode knows http/https, ftp, ws, rtsp, rtmp, mms, udp etc. I made the URL detector a bit picky on purpose. The host has to look real, so random memory garbage containing `://` doesn't flood the results.
 Long text runs are searched too; URL schemes survive stray prefix letters, encoded URLs inside redirect links are found, and UTF-16 is read at either byte alignment.
@@ -23,7 +23,7 @@ Regex mode has presets for the usual stuff: email, IPv4/IPv6, GUIDs, API keys, f
 
 ## User presets
 
-Put `regex-user-presets.ini` next to the exe and the first preset loads at startup. **User presets...** creates, edits, validates and saves them, decoder and built-in switches included. Unsaved edits stay until you save or discard. The editor resizes and maximizes; while it's open the main window waits in the taskbar and comes back when you close it.
+StringRipper always starts in URL mode. In regex mode the custom field starts empty and a dropdown next to it lists your presets, one click applies one. Drop a `regex-user-presets.ini` next to the exe and it moves into `data` on first start. **Edit user presets...** creates, edits, validates and saves them, decoder and built-in switches included. Unsaved edits stay until you save or discard. The editor resizes and maximizes; while it's open the main window waits in the taskbar and comes back when you close it.
 
 Presets can carry example lines. **Test sample** runs the patterns against pasted text (2048 chars, not saved), **Run saved cases** checks every saved line, **Add to profile** stacks presets into one scan.
 
@@ -51,7 +51,7 @@ Custom=1
 
 **Workspace...** keeps scan sessions in a local SQLite file (`StringRipper.workspace.sqlite` next to the exe), compares two sessions side by side (added, removed, unchanged) and saves named jobs: sources, profile, file filter, live interval. Process jobs follow the program name across restarts; old PID-only jobs need to be saved again. Favorite processes and paths live there too, and so does the ignore list. **Dashboard** counts findings by pattern, source and encoding. Nothing leaves your machine.
 
-Direct ASCII/UTF-16 hits and unescaped ones carry their file offset or memory address, a bit of context and named captures like `(?<version>...)`. Double-click a hit for details, right-click to inspect the bytes, open the source file or favorite the source. Decoded Base64/hex hits don't claim an offset.
+Direct ASCII/UTF-16 hits and unescaped ones carry their file offset or memory address, a bit of context and named captures like `(?<version>...)`. Double-click a hit for details, right-click to inspect the bytes, open the source file or favorite the source. The byte inspector shows offsets, hex and ASCII in three panes that scroll together, so selecting in the hex or ASCII pane copies just that, no offsets or dividers. It starts with 4 KiB around the hit, marked, and loads 4 KiB more either way. Decoded Base64/hex hits don't claim an offset.
 
 ## Ignore list
 
@@ -68,7 +68,9 @@ Case doesn't matter. The CLI takes the same rules with `--ignore`, repeatable.
 
 **Scan settings...** filters files by include/exclude glob (`*.txt,*.log`, `logs/*.txt`), size, modified date (YYYY-MM-DD) or byte/address range. **Pause/Resume** freezes producer and workers without losing queued work. **Live** rescans every N seconds and tells you what got added, removed, unchanged. **New only** shows what appeared since the last complete scan of the same source with the same options. Cancelled or failed scans never replace that baseline, Clear resets it.
 
-Results show 500 at a time. Filter by value, pattern, source or encoding.
+All results sit in one list, no pages, and it stays quick with a few hundred thousand rows. The same value found again (another memory region, another encoding) is folded into one row with a count like `×50`, details and inspection use its first hit by source and offset, the filter looks at every hit. URL mode and regex mode keep their own results, switching shows each mode's last scan. Selected rows are grey, not white. Filter by value, pattern, source or encoding, or drag a row onto the filter field: a row gives its value, a group header its host. The filter takes text dropped from anywhere, also a selection from the byte inspector.
+
+**Dump...** saves the selected process as a full-memory minidump (`.dmp`, opens in WinDbg or Visual Studio, and StringRipper scans it like any file). **Kill...** ends the selected process after asking. Esc closes the inspector, dashboard, workspace and details; windows with Save or Apply stay open.
 
 ## Regex limits
 
@@ -76,7 +78,7 @@ Regex scans run in overlapping 1024-char windows. Hits over 512 chars aren't ret
 
 ## Export
 
-**Export...** writes TXT, CSV, JSON or appends a SQLite session, and only what the filter currently shows. Paging is display only. CSV/JSON carry offsets, context and captures. CSV cells starting with `=`, `+`, `-` or `@` get a leading quote so Excel doesn't run them.
+**Export...** writes TXT, CSV, JSON or appends a SQLite session, and only what the filter currently shows. Folding is for the list only: exports, the dashboard and saved sessions keep every single hit. CSV/JSON carry offsets, context and captures. CSV cells starting with `=`, `+`, `-` or `@` get a leading quote so Excel doesn't run them.
 Invalid bytes are escaped in JSON and NUL bytes in CSV; console output keeps the same bytes as a saved export.
 
 Findings stay plain text. No clickable URLs. `Export...` and `Send to editor` write straight to disk and never touch the clipboard. This is intentional... some download managers love watching the clipboard and immediately grabbing every URL they see. `Copy selected` is the only thing that puts anything there.
@@ -160,7 +162,7 @@ StringRipper.exe --file log.txt --presets-file C:\Tools\regex-user-presets.ini -
 
 Also: `--no-escaped`, `--ignore`, `--include`, `--exclude`, size/date/range filters, `--db`, `--save-session`, `--open-session`, `--compare-sessions`, `--save-job`, `--run-job`, `--list-jobs`, `--favorite`, `--favorites` and `--format sqlite`. Repeat `--user-preset` to stack patterns. Dates are Unix seconds, ranges take decimal or `0x` hex with an exclusive end. Explicit regex/decoder switches beat the preset, whatever the order.
 
-Without `--presets-file` it reads `regex-user-presets.ini` next to the executable, not from the working directory. Exit code 0 hits, 1 no hits, 2 error (bad file, unknown preset name...).
+Without `--presets-file` it reads `data\regex-user-presets.ini` next to the executable (or `regex-user-presets.ini` right next to it), not from the working directory. Exit code 0 hits, 1 no hits, 2 error (bad file, unknown preset name...).
 Both CLIs reject unknown presets, schemes, missing inputs, invalid numbers and `--regex` mixed with `--preset` with exit code 2; numbers are decimal unless prefixed with `0x`.
 
 Reading a higher-integrity process needs an elevated StringRipper. Windows being Windows :) Drag and drop keeps working when it runs elevated, the drop messages are let through on purpose.

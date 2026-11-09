@@ -241,23 +241,37 @@ inline bool loadUserPresets(const std::filesystem::path& path, std::vector<UserP
     return true;
 }
 
+/* presets beside the executable: data\regex-user-presets.ini, else the old place next to it */
+inline std::filesystem::path presetsIn(const std::filesystem::path& dir) {
+    std::error_code ec;
+    auto data = dir / "data" / "regex-user-presets.ini";
+    if (std::filesystem::exists(data, ec)) return data;
+#ifdef _WIN32
+    /* exe folder read-only: the GUI keeps its copy in app data */
+    if (const wchar_t* local = _wgetenv(L"LOCALAPPDATA")) {
+        auto app = std::filesystem::path(local) / L"StringRipper" / L"data" / L"regex-user-presets.ini";
+        if (std::filesystem::exists(app, ec) && !std::filesystem::exists(dir / "data", ec)) return app;
+    }
+#endif
+    return dir / "regex-user-presets.ini";
+}
 inline std::filesystem::path executablePresets(const std::filesystem::path& argv0) {
 #ifdef _WIN32
     std::wstring path(32768, L'\0');
     auto n = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-    if (n && n < path.size()) { path.resize(n); return std::filesystem::path(path).parent_path() / "regex-user-presets.ini"; }
+    if (n && n < path.size()) { path.resize(n); return presetsIn(std::filesystem::path(path).parent_path()); }
 #elif defined(__linux__)
     std::error_code ec;
     auto path = std::filesystem::read_symlink("/proc/self/exe", ec);
-    if (!ec) return path.parent_path() / "regex-user-presets.ini";
+    if (!ec) return presetsIn(path.parent_path());
 #elif defined(__APPLE__)
     uint32_t n = 0;
     _NSGetExecutablePath(nullptr, &n);
     std::vector<char> path(n);
     if (_NSGetExecutablePath(path.data(), &n) == 0)
-        return std::filesystem::weakly_canonical(path.data()).parent_path() / "regex-user-presets.ini";
+        return presetsIn(std::filesystem::weakly_canonical(path.data()).parent_path());
 #endif
-    return std::filesystem::absolute(argv0).parent_path() / "regex-user-presets.ini";
+    return presetsIn(std::filesystem::absolute(argv0).parent_path());
 }
 
 struct PresetCli {

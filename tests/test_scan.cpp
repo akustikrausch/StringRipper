@@ -348,6 +348,30 @@ int main() {
         auto gb = run(url, odd);
         CHECK(ur::countFindings(gb) == 1, "UTF-16 BE at an odd offset reported once");
     }
+    // www. plus one word is dictionary text, not a site; file path preset skips escaped URLs
+    {
+        auto bytes = [](const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); };
+        const std::string dict = "\x01" "class=\"lastworking with'http://www.years beforeThis <img src=\"/ihttps://www.World War II "
+                                 "real https://www.videolan.org/vlc/ end\x01";
+        ur::Options url;
+        auto g = run(url, bytes(dict));
+        CHECK(!hasGroup(g, "www.years") && !hasGroup(g, "www.world"), "crap filter drops www. plus one word");
+        CHECK(hasValue(g, "https://www.videolan.org/vlc/"), "crap filter keeps a real www host");
+        url.dropCrap = false;
+        CHECK(hasGroup(run(url, bytes(dict)), "www.years"), "crap filter off keeps www. plus one word");
+        ur::Options path; path.mode = ur::Mode::Regex; path.presets = {"filepath"};
+        auto gp = run(path, bytes("\x01json {\"u\":\"https:\\/\\/api.cdn.example.com\\/v1\\/status\"} path C:\\Users\\J\xC3\xBCrgen\\demo.txt\x01"));
+        bool escaped = false;
+        for (auto& x : gp) for (auto& f : x.items) escaped |= f.value.find(":\\/\\/") != std::string::npos;
+        CHECK(!escaped, "file path preset skips the s:\\/\\/ of an escaped URL");
+        CHECK(hasValue(gp, "C:\\Users\\J\xC3\xBCrgen\\demo.txt"), "file path preset still finds a real path");
+        std::vector<uint8_t> w; w.push_back(0); w.push_back(0);
+        for (char c : std::string("x \"https:\\/\\/api.cdn.example.com\\/v\"")) { w.push_back((uint8_t)c); w.push_back(0); }
+        w.push_back(0); w.push_back(0);
+        bool wideEscaped = false;
+        for (auto& x : run(path, w)) for (auto& f : x.items) wideEscaped |= f.value.find(":\\/\\/") != std::string::npos;
+        CHECK(!wideEscaped, "file path preset skips escaped URLs in UTF-16 too");
+    }
     // letters of other languages stay in a URL path; host stays ASCII
     {
         auto bytes = [](const std::string& s) { return std::vector<uint8_t>(s.begin(), s.end()); };

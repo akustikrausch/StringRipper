@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <map>
 #include <sstream>
+#include <tuple>
 
 namespace ur {
 
@@ -96,6 +97,27 @@ inline std::string exportResults(const std::vector<Group>& groups, const std::st
         }
     }
     if (format == "json") out += "\n]\n";
+    return out;
+}
+
+/* each value once per group, counted; the hit first by source and offset stands
+   for the rest (sorting by value alone leaves the order of equal values open) */
+inline std::vector<Group> foldDuplicates(const std::vector<Group>& groups) {
+    std::vector<Group> out;
+    out.reserve(groups.size());
+    for (const auto& g : groups) {
+        Group f{g.name, {}};
+        std::unordered_map<std::string, std::size_t> at;
+        for (const auto& item : g.items) {
+            auto [it, fresh] = at.emplace(item.value, f.items.size());
+            if (fresh) { f.items.push_back(item); continue; }
+            auto& kept = f.items[it->second];
+            const std::size_t n = kept.occurrences + item.occurrences;
+            if (std::tie(item.source, item.offset) < std::tie(kept.source, kept.offset)) kept = item;
+            kept.occurrences = n;
+        }
+        out.push_back(std::move(f));
+    }
     return out;
 }
 

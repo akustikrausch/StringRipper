@@ -18,6 +18,10 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <ole2.h>
+#include <richedit.h>
+#include <dbghelp.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
 
@@ -62,6 +66,8 @@
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "uuid.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
 processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -320,13 +326,14 @@ enum : int {
     ID_CUSTOM, ID_SCAN, ID_CANCEL, ID_RESULTS, ID_COPY, ID_SAVE, ID_EDITOR, ID_ABOUT, ID_FILTER,
     ID_P_DL, ID_CRAP, ID_CLEAR, ID_PRESETS, ID_NEW_ONLY, ID_PAUSE, ID_PAGE_PREV, ID_PAGE_NEXT,
     ID_WORKSPACE, ID_MONITOR, ID_MONITOR_INTERVAL, ID_SCAN_SETTINGS, ID_DASHBOARD,
-    ID_ENC_ESC, ID_ALL_INSTANCES, ID_IGNORE
+    ID_ENC_ESC, ID_ALL_INSTANCES, ID_IGNORE, ID_PRESET_PICK, ID_DUMP, ID_KILL
 };
 constexpr UINT WM_APP_DONE = WM_APP + 1;
 constexpr UINT WM_APP_UPDATE_FOUND = WM_APP + 2;   // background check found a newer version
 constexpr UINT WM_APP_UPDATE_PROGRESS = WM_APP + 3; // wParam = percent, download running
 constexpr UINT WM_APP_UPDATE_DONE = WM_APP + 4;     // wParam: 1 = ready to relaunch, 0 = failed (lParam = wchar_t* msg)
 constexpr UINT WM_APP_UPDATE_UPTODATE = WM_APP + 5; // manual check: nothing newer
+constexpr UINT WM_APP_DUMP_DONE = WM_APP + 6;      // wParam: 1 = written, lParam = error code
 constexpr UINT_PTR TIMER_PROGRESS = 1;
 constexpr UINT_PTR TIMER_PROCS = 2;
 constexpr UINT_PTR TIMER_MONITOR = 3;
@@ -357,7 +364,9 @@ HWND g_secDecode, g_ascii, g_utf16, g_b64, g_hex, g_esc;
 HWND g_scan, g_pause, g_cancel, g_monitor, g_monitorInterval, g_status;
 HWND g_secResults, g_filter, g_results, g_copy, g_save, g_editor, g_clear, g_about;
 HWND g_pagePrev, g_pageNext, g_pageLabel, g_workspace, g_dashboard;
-HWND g_newOnly, g_allInst, g_ignoreChip;
+HWND g_newOnly, g_allInst, g_ignoreChip, g_presetPick, g_dump, g_kill;
+std::thread g_dumpThread;
+std::wstring g_dumpPath;
 ur::ScanComparison g_comparison;
 std::vector<ur::Group> g_newResults;
 std::vector<ur::Group> g_previousComplete;
@@ -367,7 +376,7 @@ bool g_hasComparison = false;
 HFONT g_font = nullptr, g_fontHdr = nullptr, g_fontMono = nullptr;
 int g_dpi = 96;
 RECT g_segRect{};
-RECT g_fields[4]{};
+RECT g_fields[5]{};
 RECT g_listCard{};
 int S(int v) { return MulDiv(v, g_dpi, 96); }
 HBRUSH g_bgBrush = nullptr, g_bg2Brush = nullptr;
@@ -375,14 +384,18 @@ HBRUSH g_bgBrush = nullptr, g_bg2Brush = nullptr;
 std::vector<fxchain::RipProcess> g_procsAll;   // full enumeration
 std::vector<fxchain::RipProcess> g_procsView;  // what the combo currently shows
 std::atomic<bool> g_cancelFlag{false};
+std::atomic<bool> g_closing{false};      /* window going away: stops a running dump */
 ur::ScanGate g_scanGate;
 std::atomic<bool> g_scanning{false};
 std::atomic<long long> g_elapsedMs{0};
 std::vector<ur::Group> g_lastResults;
-std::vector<ur::Group> g_viewResults;
-std::vector<ur::Group> g_pageResults;
-std::size_t g_page = 0;
-constexpr std::size_t kPageSize = 500;
+std::vector<ur::Group> g_viewResults;   /* folded, what the list shows */
+std::vector<ur::Group> g_viewHits;      /* the same rows unfolded: exports, dashboard, sessions */
+struct ResultRow { int group, item; };       // item -1: the group's header row
+std::vector<ResultRow> g_rows;                  /* the virtual list: per group a header, then its values */
+std::vector<ur::Group> g_base;                  /* folded and ignore-filtered, what the text filter runs over */
+std::size_t g_baseHidden = 0, g_baseRows = 0;
+const COLORREF kSel = RGB(0x34, 0x36, 0x44);    /* selected rows: grey, not system white */
 std::wstring g_statusFull;
 ur::Mode g_lastMode = ur::Mode::Urls;
 std::vector<std::filesystem::path> g_chosenPaths;
@@ -403,6 +416,7 @@ std::thread g_scanThread;
 /* auto-update state, all touched only on the UI thread except the worker
    below, which only PostMessages back. See update.hpp. */
 std::filesystem::path appDataDir();
+void fillPresetPick();
 bool g_portable = false;                           // data next to the exe
 ur::UpdatePrefs g_updatePrefs;
 ur::UpdateInfo g_update;
@@ -539,8 +553,11 @@ void drawCombo(const DRAWITEMSTRUCT* d) {
     FillRect(d->hDC, &d->rcItem, b);
     DeleteObject(b);
     if ((int)d->itemID < 0) return;
-    wchar_t t[256] = L"";
-    SendMessageW(d->hwndItem, CB_GETLBTEXT, d->itemID, (LPARAM)t);
+    const LRESULT len = SendMessageW(d->hwndItem, CB_GETLBTEXTLEN, d->itemID, 0);
+    if (len < 0) return;
+    std::wstring text(size_t(len) + 1, L'\0');
+    SendMessageW(d->hwndItem, CB_GETLBTEXT, d->itemID, (LPARAM)text.data());
+    const wchar_t* t = text.c_str();
     HFONT of = (HFONT)SelectObject(d->hDC, g_font);
     SetBkMode(d->hDC, TRANSPARENT);
     SetTextColor(d->hDC, kText);
@@ -619,12 +636,7 @@ std::wstring controlText(HWND h) {
     return s;
 }
 
-std::filesystem::path presetFilePath() {
-    std::wstring p(32768, L'\0');
-    DWORD n = GetModuleFileNameW(nullptr, p.data(), (DWORD)p.size());
-    p.resize(n);
-    return std::filesystem::path(p).parent_path() / L"regex-user-presets.ini";
-}
+std::filesystem::path presetFilePath() { return appDataDir() / L"regex-user-presets.ini"; }
 
 void applyUserPreset(const ur::UserPreset& p) {
     g_applyingPreset = true;
@@ -965,6 +977,7 @@ LRESULT CALLBACK PresetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CLOSE: peClose(h); return 0;
     case WM_DESTROY:
         g_pe = nullptr; EnableWindow(g_main, TRUE);
+        fillPresetPick();
         if (IsIconic(g_main)) ShowWindow(g_main, SW_RESTORE);
         SetForegroundWindow(g_main); return 0;
     }
@@ -1158,70 +1171,7 @@ LRESULT CALLBACK resultsSub(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DW
             return CDRF_SKIPDEFAULT;
         }
     }
-    LRESULT res = DefSubclassProc(h, msg, wp, lp);
-    if (msg != WM_PAINT) return res;
-
-    RECT cr; GetClientRect(h, &cr);
-    const int n = (int)g_pageResults.size();
-    int lo = 0, hi = n - 1, first = n;
-    while (lo <= hi) {
-        int mid = (lo + hi) >> 1;
-        RECT r{};
-        ListView_GetGroupRect(h, mid, LVGGR_HEADER, &r);
-        if (r.bottom > cr.top) { first = mid; hi = mid - 1; } else lo = mid + 1;
-    }
-
-    HDC dc = GetDC(h);
-    RECT hr{};
-    GetClientRect(ListView_GetHeader(h), &hr);
-    HBRUSH rule = CreateSolidBrush(kCard);
-    for (int c = 0, x = 0; c < 2; ++c) {
-        x += ListView_GetColumnWidth(h, c);
-        RECT rr{ x - 2, hr.bottom, x + 2, cr.bottom };
-        FillRect(dc, &rr, rule);
-    }
-    DeleteObject(rule);
-    HFONT of = (HFONT)SelectObject(dc, g_fontHdr);
-    HPEN pen = CreatePen(PS_SOLID, 1, kBSub), op = (HPEN)SelectObject(dc, pen);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, kAccent2);
-    for (int i = first; i < n; ++i) {
-        RECT gr{};
-        ListView_GetGroupRect(h, i, LVGGR_HEADER, &gr);
-        if (gr.top >= cr.bottom) break;
-        const ur::Group& g = g_pageResults[i];
-        FillRect(dc, &gr, g_bgBrush);
-        MoveToEx(dc, gr.left, gr.bottom - 1, nullptr);
-        LineTo(dc, gr.right, gr.bottom - 1);
-
-        std::wstring t = widen(g.name);
-        RECT tr = gr; tr.left += S(12);
-        HFONT om = (HFONT)SelectObject(dc, g_fontMono);
-        SIZE sz{};
-        GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &sz);
-        SetTextColor(dc, kText);
-        DrawTextW(dc, t.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
-        SelectObject(dc, om);
-
-        std::wstring cnt = std::to_wstring(g.items.size());
-        SIZE cs{};
-        HFONT ou = (HFONT)SelectObject(dc, g_font);
-        GetTextExtentPoint32W(dc, cnt.c_str(), (int)cnt.size(), &cs);
-        SelectObject(dc, ou);
-        const int ch = S(20);
-        RECT chip{ tr.left + sz.cx + S(10), (gr.top + gr.bottom - ch) / 2, 0, 0 };
-        chip.right = chip.left + cs.cx + S(14);
-        chip.bottom = chip.top + ch;
-        if (chip.right < gr.right - S(8)) {
-            roundRect(dc, chip, ch, kBg, kBDef);
-            inkText(dc, cnt.c_str(), chip, g_font, kText2, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-        }
-    }
-    SelectObject(dc, op); DeleteObject(pen);
-    SelectObject(dc, of);
-
-    ReleaseDC(h, dc);
-    return res;
+    return DefSubclassProc(h, msg, wp, lp);
 }
 
 ur::Options gatherOptions() {
@@ -1252,7 +1202,7 @@ void updateModeVisibility() {
     bool regex = isChecked(g_modeRegex);
     int rx = regex ? SW_SHOW : SW_HIDE;
     for (HWND h : {g_presetLabel, g_pEmail, g_pIpv4, g_pIpv6, g_pGuid, g_pApi, g_pPath, g_pDl,
-                   g_customLabel, g_custom, g_presets})
+                   g_customLabel, g_custom, g_presets, g_presetPick})
         ShowWindow(h, rx);
     ShowWindow(g_urlHint, regex ? SW_HIDE : SW_SHOW);
     ShowWindow(g_crap, regex ? SW_HIDE : SW_SHOW);
@@ -1265,11 +1215,10 @@ void clearResults() {
     g_previousComplete.clear(); g_liveDelta = {};
     setChecked(g_newOnly, false); EnableWindow(g_newOnly, FALSE);
     g_lastResults.clear();
-    g_viewResults.clear();
-    g_pageResults.clear(); g_page = 0;
+    g_viewResults.clear(); g_viewHits.clear();
+    g_rows.clear(); g_base.clear(); g_baseHidden = 0; g_baseRows = 0;
     g_resultsPid = 0; g_resultsPids.clear();
-    ListView_DeleteAllItems(g_results);
-    ListView_RemoveAllGroups(g_results);
+    ListView_SetItemCountEx(g_results, 0, 0);
     SetWindowTextW(g_filter, L"");
     g_statusFull = L"Ready.";
     SetWindowTextW(g_status, L"Ready.");
@@ -1283,6 +1232,8 @@ void setScanningUi(bool on) {
     EnableWindow(g_settingsButton, !on);
     EnableWindow(g_pause, on);
     EnableWindow(g_cancel, on);
+    for (HWND h : {g_modeUrl, g_modeRegex, g_presetPick, g_kill}) { EnableWindow(h, !on); InvalidateRect(h, nullptr, TRUE); }
+    EnableWindow(g_dump, !on && !g_dumpThread.joinable()); InvalidateRect(g_dump, nullptr, TRUE);
     if (!on) { g_scanGate.setPaused(false); SetWindowTextW(g_pause, L"Pause"); }
     /* repaint now: a fast file rescan can start and finish between ordinary
        paint cycles, which left these owner-draw buttons blank mid-scan. */
@@ -1295,85 +1246,56 @@ void enableResultActions(bool on) {
     for (HWND h : {g_copy, g_save, g_editor, g_clear}) { EnableWindow(h, on); InvalidateRect(h, nullptr, TRUE); }
 }
 
-int g_srcWant = 0;   /* widest source on the page, so region labels stay readable */
+int g_srcWant = 0;   /* widest source shown, so region labels stay readable */
 void populateResults(const std::vector<ur::Group>& groups) {
-    const auto total = ur::countFindings(groups);
-    const auto pages = std::max<std::size_t>(1, (total + kPageSize - 1) / kPageSize);
-    if (g_page >= pages) g_page = pages - 1;
-    const auto begin = g_page * kPageSize, end = std::min(total, begin + kPageSize);
-    g_pageResults.clear();
-    std::size_t at = 0;
-    for (const auto& g : groups) {
-        ur::Group pageGroup{g.name, {}};
-        for (const auto& f : g.items) {
-            if (at >= begin && at < end) pageGroup.items.push_back(f);
-            ++at;
-        }
-        if (!pageGroup.items.empty()) g_pageResults.push_back(std::move(pageGroup));
+    g_rows.clear();
+    for (int gi = 0; gi < (int)groups.size(); ++gi) {
+        g_rows.push_back({gi, -1});
+        for (int i = 0; i < (int)groups[gi].items.size(); ++i) g_rows.push_back({gi, i});
     }
-    EnableWindow(g_pagePrev, g_page > 0);
-    EnableWindow(g_pageNext, g_page + 1 < pages);
-    SetWindowTextW(g_pageLabel, (std::to_wstring(g_page + 1) + L" / " + std::to_wstring(pages)).c_str());
-    ListView_DeleteAllItems(g_results);
-    ListView_RemoveAllGroups(g_results);
-    ListView_EnableGroupView(g_results, TRUE);
     HDC measure = GetDC(g_results);
     HFONT oldFont = (HFONT)SelectObject(measure, g_fontMono);
     std::unordered_set<std::string> measured;
     g_srcWant = 0;
-    int item = 0, gid = 0;
-    for (const auto& g : g_pageResults) {
-        /* empty default header: we owner-paint name + count in resultsSub, so the
-           listview must draw nothing here or the two renders ghost each other. */
-        wchar_t blank[] = L"";
-        LVGROUP lg{};
-        lg.cbSize = sizeof(lg);
-        lg.mask = LVGF_HEADER | LVGF_GROUPID;
-        lg.pszHeader = blank;
-        lg.iGroupId = gid;
-        ListView_InsertGroup(g_results, -1, &lg);
-        for (const auto& f : g.items) {
-            std::wstring v = widen(f.value);
-            LVITEMW it{};
-            it.mask = LVIF_TEXT | LVIF_GROUPID;
-            it.iItem = item;
-            it.pszText = v.data();
-            it.iGroupId = gid;
-            int idx = ListView_InsertItem(g_results, &it);
-            std::wstring enc = widen(ur::encName(f.enc));
-            ListView_SetItemText(g_results, idx, 1, enc.data());
-            std::wstring src = widen(f.source);
-            ListView_SetItemText(g_results, idx, 2, src.data());
-            if (measured.insert(f.source).second) {
-                SIZE sz{}; GetTextExtentPoint32W(measure, src.c_str(), (int)src.size(), &sz);
-                g_srcWant = std::max(g_srcWant, (int)sz.cx);
-            }
-            if (f.hasOffset) {
-                wchar_t addr[32];
-                _snwprintf_s(addr, _TRUNCATE, L"0x%llX", (unsigned long long)f.offset);
-                ListView_SetItemText(g_results, idx, 3, addr);
-            }
-            ++item;
-        }
-        ++gid;
+    for (const auto& g : groups) for (const auto& f : g.items) {
+        if (measured.size() > 2000) break;
+        if (!measured.insert(f.source).second) continue;
+        std::wstring src = widen(f.source);
+        SIZE sz{}; GetTextExtentPoint32W(measure, src.c_str(), (int)src.size(), &sz);
+        g_srcWant = std::max(g_srcWant, (int)sz.cx);
     }
     SelectObject(measure, oldFont);
     ReleaseDC(g_results, measure);
+    ListView_SetItemState(g_results, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_SetItemCountEx(g_results, (int)g_rows.size(), 0);
+    if (!g_rows.empty()) ListView_EnsureVisible(g_results, 0, FALSE);
     fitColumns();
+    InvalidateRect(g_results, nullptr, TRUE);
 }
 
-void applyResultFilter() {
-    g_page = 0;
+/* rebuild = results, ignore list or New only changed; typing in the filter
+   only re-runs the text match over the folded base */
+void applyResultFilter(bool rebuild = true) {
     wchar_t q[256] = L"";
     GetWindowTextW(g_filter, q, 256);
     std::string query = lower(narrow(q));
     g_viewResults.clear();
-    const auto& visible = isChecked(g_newOnly) && g_hasComparison ? g_newResults : g_lastResults;
-    std::size_t hidden = 0;
-    const bool ignoring = isChecked(g_ignoreChip) && !g_ignore.empty();
-    const auto kept = ignoring ? ur::filterIgnored(visible, g_ignore, &hidden) : std::vector<ur::Group>{};
-    for (const auto& g : ignoring ? kept : visible) {
-        if (query.empty() || lower(g.name).find(query) != std::string::npos) { g_viewResults.push_back(g); continue; }
+    if (rebuild) {
+        const auto& visible = isChecked(g_newOnly) && g_hasComparison ? g_newResults : g_lastResults;
+        g_base = visible;
+        g_baseHidden = 0;
+        g_baseRows = ur::countFindings(ur::foldDuplicates(g_base));
+        if (isChecked(g_ignoreChip) && !g_ignore.empty()) {     /* hidden counted in rows, like the rest of the status */
+            g_base = ur::filterIgnored(g_base, g_ignore);
+            const std::size_t rows = ur::countFindings(ur::foldDuplicates(g_base));
+            g_baseHidden = g_baseRows - rows;
+            g_baseRows = rows;
+        }
+    }
+    const std::size_t hidden = g_baseHidden;
+    g_viewHits.clear();
+    for (const auto& g : g_base) {
+        if (query.empty() || lower(g.name).find(query) != std::string::npos) { g_viewHits.push_back(g); continue; }
         ur::Group hit;
         hit.name = g.name;
         for (const auto& f : g.items)
@@ -1381,8 +1303,9 @@ void applyResultFilter() {
                 lower(f.source).find(query) != std::string::npos ||
                 lower(ur::encName(f.enc)).find(query) != std::string::npos)
                 hit.items.push_back(f);
-        if (!hit.items.empty()) g_viewResults.push_back(std::move(hit));
+        if (!hit.items.empty()) g_viewHits.push_back(std::move(hit));
     }
+    g_viewResults = ur::foldDuplicates(g_viewHits);     /* every hit is matched, then folded for the list */
     populateResults(g_viewResults);
     enableResultActions(!g_viewResults.empty());
     if (query.empty() && !isChecked(g_newOnly) && !hidden) { SetWindowTextW(g_status, g_statusFull.c_str()); return; }
@@ -1393,7 +1316,7 @@ void applyResultFilter() {
     if (hidden) add(std::to_wstring(hidden) + L" hidden by ignore list");
     wchar_t msg[256];
     _snwprintf_s(msg, _TRUNCATE, L"%zu of %zu results   (%s)",
-                 ur::countFindings(g_viewResults), ur::countFindings(g_lastResults), why.c_str());
+                 ur::countFindings(g_viewResults), g_baseRows, why.c_str());
     SetWindowTextW(g_status, msg);
 }
 
@@ -1414,8 +1337,10 @@ void onDone(std::vector<ur::Group>* groups) {
     g_resultsPid = (g_scanPid && !g_scanDenied) ? g_scanPid : 0;
     g_resultsPids = g_scanDenied ? std::vector<uint32_t>{} : g_scanPids;
     wchar_t msg[256];
-    _snwprintf_s(msg, _TRUNCATE, L"%zu results in %zu groups, sorted Z to A   (%.2f s)%s",
-                 ur::countFindings(g_lastResults), g_lastResults.size(),
+    const std::size_t hits = ur::countFindings(g_lastResults), shown = ur::countFindings(ur::foldDuplicates(g_lastResults));
+    _snwprintf_s(msg, _TRUNCATE, L"%zu results in %zu groups%s, sorted Z to A   (%.2f s)%s",
+                 shown, g_lastResults.size(),
+                 hits > shown ? (L" (" + std::to_wstring(hits) + L" hits)").c_str() : L"",
                  g_elapsedMs.load() / 1000.0, g_cancelFlag ? L"  (cancelled)" : L"");
     g_statusFull = msg;
     if (!g_scanError.empty()) g_statusFull = L"Scan failed: " + widen(g_scanError);
@@ -1454,11 +1379,44 @@ void onDone(std::vector<ur::Group>* groups) {
     }
 }
 
-void setRegexMode() {
-    setChecked(g_modeUrl, false);
-    setChecked(g_modeRegex, true);
+/* URL and regex mode keep their own last results; the inactive mode's wait here */
+struct ResultSlot {
+    std::vector<ur::Group> last, fresh, previous;
+    ur::ScanComparison comparison;
+    ur::SessionDelta delta;
+    std::string context;
+    bool hasComparison = false;
+    std::wstring status = L"Ready.";
+    uint32_t pid = 0;
+    std::vector<uint32_t> pids;
+} g_otherSlot;
+void switchMode(bool regex) {
+    if (isChecked(g_modeRegex) != regex && !g_scanning) {
+        KillTimer(g_main, TIMER_MONITOR); setChecked(g_monitor, false);
+        std::swap(g_lastResults, g_otherSlot.last); std::swap(g_newResults, g_otherSlot.fresh);
+        std::swap(g_previousComplete, g_otherSlot.previous); std::swap(g_comparison, g_otherSlot.comparison);
+        std::swap(g_liveDelta, g_otherSlot.delta); std::swap(g_scanContext, g_otherSlot.context);
+        std::swap(g_hasComparison, g_otherSlot.hasComparison); std::swap(g_statusFull, g_otherSlot.status);
+        std::swap(g_resultsPid, g_otherSlot.pid); std::swap(g_resultsPids, g_otherSlot.pids);
+        setChecked(g_modeUrl, !regex); setChecked(g_modeRegex, regex);
+        g_lastMode = regex ? ur::Mode::Regex : ur::Mode::Urls;
+        setChecked(g_newOnly, false); EnableWindow(g_newOnly, g_hasComparison);
+        applyResultFilter();
+        enableResultActions(!g_viewResults.empty());
+    }
     updateModeVisibility();
     relayout(g_main);
+}
+void setRegexMode() { switchMode(true); }
+void fillPresetPick() {
+    SendMessageW(g_presetPick, CB_RESETCONTENT, 0, 0);
+    SendMessageW(g_presetPick, CB_ADDSTRING, 0, (LPARAM)(g_userPresets.empty() ? L"No user presets" : L"Pick a preset..."));
+    int active = 0;
+    for (int i = 0; i < (int)g_userPresets.size(); ++i) {
+        SendMessageW(g_presetPick, CB_ADDSTRING, 0, (LPARAM)widen(g_userPresets[i].name).c_str());
+        if (!g_activePreset.empty() && g_userPresets[i].name == g_activePreset) active = i + 1;
+    }
+    SendMessageW(g_presetPick, CB_SETCURSEL, active, 0);
 }
 
 void doScan() {
@@ -1570,29 +1528,40 @@ bool writableDir(const std::filesystem::path& dir) {
     CloseHandle(h);
     return true;
 }
+/* settings live in data\ beside the exe, so the folder is the whole install; a
+   folder we may not write to falls back to %LOCALAPPDATA%\StringRipper\data.
+   Older layouts move in once: 1.3.0 files beside the exe and 1.2.x files in
+   app data are moved, 1.2.x app data feeding a portable start is copied. */
 std::filesystem::path appDataDir() {
     static const std::filesystem::path dir = [] {
         wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr, exe, MAX_PATH);
         auto here = std::filesystem::path(exe).parent_path(), old = oldDataDir();
         std::error_code ec;
-        if (writableDir(here)) {
-            g_portable = true;
-            for (auto [from, to] : {std::pair{L"workspace.sqlite", L"StringRipper.workspace.sqlite"},
-                                    std::pair{L"update.ini", L"StringRipper.update.ini"}})
-                if (!old.empty() && !std::filesystem::exists(here / to, ec) && std::filesystem::exists(old / from, ec))
-                    std::filesystem::copy_file(old / from, here / to, ec);
-            return here;
-        }
-        if (old.empty()) return here;
-        std::filesystem::create_directories(old, ec);
-        return old;
+        auto adopt = [&](const std::filesystem::path& from, const std::filesystem::path& to, bool move) {
+            if (std::filesystem::exists(to, ec) || !std::filesystem::exists(from, ec)) return;
+            if (move) { std::filesystem::rename(from, to, ec); if (!ec) return; ec.clear(); }
+            std::filesystem::copy_file(from, to, ec);
+        };
+        const bool portable = writableDir(here);
+        if (!portable && old.empty()) return here;
+        auto data = (portable ? here : old) / L"data";
+        std::filesystem::create_directories(data, ec);
+        /* a db travels with its journal files, and only from one place: 1.3.0 beside the exe first */
+        const wchar_t* db[] = {L"workspace.sqlite-journal", L"workspace.sqlite-wal", L"workspace.sqlite-shm", L"workspace.sqlite"};
+        if (portable && !std::filesystem::exists(data / L"workspace.sqlite", ec))
+            for (const wchar_t* n : db) adopt(here / (std::wstring(L"StringRipper.") + n), data / n, true);
+        if (!old.empty() && !std::filesystem::exists(data / L"workspace.sqlite", ec))
+            for (const wchar_t* n : db) adopt(old / n, data / n, !portable);
+        if (portable) adopt(here / L"StringRipper.update.ini", data / L"update.ini", true);
+        if (!old.empty()) adopt(old / L"update.ini", data / L"update.ini", !portable);
+        for (const wchar_t* n : {L"regex-user-presets.ini", L"regex-user-presets.ini.bak"})
+            adopt(here / n, data / n, portable);
+        g_portable = portable;
+        return data;
     }();
     return dir;
 }
-std::filesystem::path dataFile(const wchar_t* name) {
-    auto dir = appDataDir();
-    return g_portable ? dir / (std::wstring(L"StringRipper.") + name) : dir / name;
-}
+std::filesystem::path dataFile(const wchar_t* name) { return appDataDir() / name; }
 std::filesystem::path workspaceDatabase() { return dataFile(L"workspace.sqlite"); }
 
 void loadIgnoreRules() {
@@ -1908,7 +1877,7 @@ LRESULT CALLBACK DashboardProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CREATE: {
         darkTitle(h);
         peCtl(h, L"STATIC", L"Findings by pattern, source and encoding", 0, 0, 16, 14, 560, 24);
-        auto summary = widen(ur::dashboardText(ur::summarizeResults(g_viewResults)));
+        auto summary = widen(ur::dashboardText(ur::summarizeResults(g_viewHits)));
         peCtl(h, L"EDIT", summary.c_str(), 0,
               ES_MULTILINE | ES_READONLY | WS_BORDER | WS_VSCROLL | WS_HSCROLL,
               16, 42, 568, 408);
@@ -2061,13 +2030,173 @@ void showScanSettings() {
 }
 
 const ur::Finding* findingAtRow(int row) {
-    if (row < 0) return nullptr;
-    for (const auto& g : g_pageResults) {
-        if (row < (int)g.items.size()) return &g.items[row];
-        row -= (int)g.items.size();
-    }
-    return nullptr;
+    if (row < 0 || row >= (int)g_rows.size() || g_rows[row].item < 0) return nullptr;
+    return &g_viewResults[g_rows[row].group].items[g_rows[row].item];
 }
+/* what a row says: the value for a hit, the group name for a header */
+std::wstring rowText(int row, int col) {
+    if (row < 0 || row >= (int)g_rows.size()) return {};
+    const auto& g = g_viewResults[g_rows[row].group];
+    if (g_rows[row].item < 0) return col == 0 ? widen(g.name) : std::wstring();
+    const auto& f = g.items[g_rows[row].item];
+    switch (col) {
+    case 0: return widen(f.value);
+    case 1: return widen(ur::encName(f.enc));
+    case 2: return widen(f.source);
+    default: {
+        if (!f.hasOffset) return {};
+        wchar_t a[32]; _snwprintf_s(a, _TRUNCATE, L"0x%llX", (unsigned long long)f.offset);
+        return a;
+    }
+    }
+}
+void drawResultRow(HWND lv, HDC dc, int row) {
+    if (row < 0 || row >= (int)g_rows.size()) return;
+    static HBRUSH selBrush = CreateSolidBrush(kSel), cardBrush = CreateSolidBrush(kCard);
+    RECT rr{}; ListView_GetItemRect(lv, row, &rr, LVIR_BOUNDS);
+    const bool sel = (ListView_GetItemState(lv, row, LVIS_SELECTED) & LVIS_SELECTED) != 0;
+    const auto& g = g_viewResults[g_rows[row].group];
+    SetBkMode(dc, TRANSPARENT);
+    HFONT of = (HFONT)SelectObject(dc, g_fontMono);
+    if (g_rows[row].item < 0) {
+        FillRect(dc, &rr, sel ? selBrush : g_bgBrush);
+        HPEN pen = CreatePen(PS_SOLID, 1, kBSub), op = (HPEN)SelectObject(dc, pen);
+        MoveToEx(dc, rr.left, rr.bottom - 1, nullptr); LineTo(dc, rr.right, rr.bottom - 1);
+        SelectObject(dc, op); DeleteObject(pen);
+        std::wstring t = widen(g.name);
+        RECT tr = rr; tr.left += S(12);
+        SIZE sz{}; GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &sz);
+        SetTextColor(dc, kText);
+        DrawTextW(dc, t.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        std::wstring cnt = std::to_wstring(g.items.size());
+        SelectObject(dc, g_font);
+        SIZE cs{}; GetTextExtentPoint32W(dc, cnt.c_str(), (int)cnt.size(), &cs);
+        const int ch = S(18);
+        RECT chip{ tr.left + sz.cx + S(10), (rr.top + rr.bottom - ch) / 2, 0, 0 };
+        chip.right = chip.left + cs.cx + S(14); chip.bottom = chip.top + ch;
+        if (chip.right < rr.right - S(8)) {
+            roundRect(dc, chip, ch, kBg, kBDef);
+            inkText(dc, cnt.c_str(), chip, g_font, kText2, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        }
+        SelectObject(dc, of);
+        return;
+    }
+    FillRect(dc, &rr, sel ? selBrush : cardBrush);
+    const auto& f = g.items[g_rows[row].item];
+    int x = rr.left;
+    for (int c = 0; c < 4; ++c) {
+        const int w = ListView_GetColumnWidth(lv, c);
+        RECT cr{ x + S(6), rr.top, x + w - S(6), rr.bottom };
+        x += w;
+        std::wstring t = rowText(row, c);
+        if (c == 1) {
+            SelectObject(dc, g_font);
+            SIZE sz{}; GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &sz);
+            const int ch = S(20);
+            RECT chip{ cr.left, (rr.top + rr.bottom - ch) / 2, cr.left + sz.cx + S(14), (rr.top + rr.bottom - ch) / 2 + ch };
+            roundRect(dc, chip, S(12), kBg3, kBg3);
+            inkText(dc, t.c_str(), chip, g_font, kText2, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            SelectObject(dc, g_fontMono);
+            continue;
+        }
+        if (c == 0 && f.occurrences > 1) {
+            std::wstring times = L"\u00D7" + std::to_wstring(f.occurrences);
+            SelectObject(dc, g_font);
+            SIZE sz{}; GetTextExtentPoint32W(dc, times.c_str(), (int)times.size(), &sz);
+            const int ch = S(18);
+            RECT chip{ cr.right - sz.cx - S(12), (rr.top + rr.bottom - ch) / 2, cr.right, (rr.top + rr.bottom - ch) / 2 + ch };
+            roundRect(dc, chip, ch, kBg, kBDef);
+            inkText(dc, times.c_str(), chip, g_font, kText2, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+            SelectObject(dc, g_fontMono);
+            cr.right = chip.left - S(6);
+        }
+        SetTextColor(dc, c == 2 ? kText3 : kText);
+        DrawTextW(dc, t.c_str(), -1, &cr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+    SelectObject(dc, of);
+}
+
+/* drag a row out: the value, or the group name from a header row */
+struct DropSource final : IDropSource {
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) override {
+        if (id == IID_IUnknown || id == IID_IDropSource) { *out = this; return S_OK; }
+        *out = nullptr; return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL esc, DWORD keys) override {
+        if (esc) return DRAGDROP_S_CANCEL;
+        return (keys & MK_LBUTTON) ? S_OK : DRAGDROP_S_DROP;
+    }
+    HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
+};
+void dragText(const std::wstring& text) {
+    if (text.empty()) return;
+    IDataObject* data = nullptr;
+    if (FAILED(SHCreateDataObject(nullptr, 0, nullptr, nullptr, IID_PPV_ARGS(&data)))) return;
+    FORMATETC fe{ CF_UNICODETEXT, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+    STGMEDIUM sm{}; sm.tymed = TYMED_HGLOBAL;
+    sm.hGlobal = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t));
+    if (sm.hGlobal) {
+        memcpy(GlobalLock(sm.hGlobal), text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+        GlobalUnlock(sm.hGlobal);
+        if (SUCCEEDED(data->SetData(&fe, &sm, TRUE))) {
+            DropSource src; DWORD effect = 0;
+            DoDragDrop(data, &src, DROPEFFECT_COPY, &effect);
+        } else GlobalFree(sm.hGlobal);
+    }
+    data->Release();
+}
+/* the filter field takes text from anywhere (first line), and files like the window does */
+struct FilterDrop final : IDropTarget {
+    DWORD effect = DROPEFFECT_NONE;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** out) override {
+        if (id == IID_IUnknown || id == IID_IDropTarget) { *out = this; return S_OK; }
+        *out = nullptr; return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    static bool has(IDataObject* d, CLIPFORMAT cf) {
+        FORMATETC fe{ cf, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        return d && d->QueryGetData(&fe) == S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* d, DWORD, POINTL, DWORD* e) override {
+        effect = has(d, CF_UNICODETEXT) || has(d, CF_HDROP) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        *e = effect; return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD* e) override { *e = effect; return S_OK; }
+    HRESULT STDMETHODCALLTYPE DragLeave() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* d, DWORD, POINTL, DWORD* e) override {
+        *e = DROPEFFECT_NONE;
+        STGMEDIUM sm{};
+        FORMATETC text{ CF_UNICODETEXT, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        FORMATETC files{ CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        if (d->GetData(&text, &sm) == S_OK) {
+            const auto* w = (const wchar_t*)GlobalLock(sm.hGlobal);
+            const SIZE_T cap = GlobalSize(sm.hGlobal) / sizeof(wchar_t);
+            std::wstring t = w ? std::wstring(w, wcsnlen(w, cap)) : std::wstring();
+            GlobalUnlock(sm.hGlobal); ReleaseStgMedium(&sm);
+            t = t.substr(0, t.find_first_of(L"\r\n"));
+            if (t.size() > 255) t.resize(255);
+            SetWindowTextW(g_filter, t.c_str());
+            SetFocus(g_filter);
+            *e = DROPEFFECT_COPY;
+        } else if (d->GetData(&files, &sm) == S_OK) {
+            std::vector<std::filesystem::path> paths;
+            auto drop = (HDROP)GlobalLock(sm.hGlobal);
+            UINT n = drop ? DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0) : 0;
+            for (UINT i = 0; i < n; ++i) {
+                std::wstring f(DragQueryFileW(drop, i, nullptr, 0) + 1, L'\0');
+                f.resize(DragQueryFileW(drop, i, f.data(), (UINT)f.size()));
+                paths.push_back(std::move(f));
+            }
+            GlobalUnlock(sm.hGlobal); ReleaseStgMedium(&sm);
+            if (!paths.empty()) { setSourcePaths(std::move(paths)); SetWindowTextW(g_status, L"Dropped. Hit Scan."); }
+            *e = DROPEFFECT_COPY;
+        }
+        return S_OK;
+    }
+} g_filterDrop;
 void showFindingDetails(ur::Finding f) {
     std::wstring s = L"Value: " + widen(f.value) + L"\r\nGroup: " + widen(f.group) +
         L"\r\nEncoding: " + widen(ur::encName(f.enc)) + L"\r\nSource: " + widen(f.source);
@@ -2084,40 +2213,201 @@ void showFindingDetails(ur::Finding f) {
     }
     MessageBoxW(g_main, s.c_str(), L"Finding details", MB_OK | MB_ICONINFORMATION);
 }
-HWND g_inspector = nullptr;
-std::wstring g_inspectorText;
+/* byte inspector: offsets, hex and ASCII in three panes that scroll together,
+   so a selection in one pane copies (or drags) only that pane's text. Starts
+   with 4 KiB around the hit and grows 4 KiB at a time in either direction. */
+enum : int { IN_EARLIER = 6400, IN_LATER, IN_INFO };
+struct Inspect { bool file = false; std::filesystem::path path; uint32_t pid = 0; uint64_t start = 0, hit = 0; std::vector<uint8_t> bytes; };
+Inspect g_ins;
+HWND g_inspector = nullptr, g_insPane[3]{}, g_insInfo = nullptr;
+bool g_insSyncing = false;
+constexpr std::size_t kInspectStep = 4096;
+
+std::size_t inspectRead(uint64_t at, uint8_t* out, std::size_t n) {
+    std::size_t got = 0;
+    if (g_ins.file) {
+        std::ifstream in(g_ins.path, std::ios::binary);
+        if (in) { in.seekg((std::streamoff)at); in.read((char*)out, (std::streamsize)n); got = (std::size_t)std::max<std::streamsize>(0, in.gcount()); }
+    } else if (g_ins.pid) {
+        fxchain::RipStats stats; fxchain::RipTargetInfo info;
+        fxchain::ripBackend().withReader(g_ins.pid, stats, info, [&](fxchain::IMemoryReader& r) { got = r.read(at, out, n).bytesRead; });
+    }
+    return got;
+}
+/* earlier bytes: one read, or line by line back to the first unreadable one */
+std::size_t inspectEarlier() {
+    const std::size_t want = (std::size_t)std::min<uint64_t>(kInspectStep, g_ins.start);
+    if (!want) return 0;
+    std::vector<uint8_t> buf(want);
+    if (inspectRead(g_ins.start - want, buf.data(), want) != want) {
+        buf.clear();
+        for (std::size_t back = 16; back <= want; back += 16) {
+            uint8_t line[16];
+            if (inspectRead(g_ins.start - back, line, 16) != 16) break;
+            buf.insert(buf.begin(), line, line + 16);
+        }
+    }
+    g_ins.bytes.insert(g_ins.bytes.begin(), buf.begin(), buf.end());
+    g_ins.start -= buf.size();
+    return buf.size();
+}
+std::size_t inspectLater() {
+    std::vector<uint8_t> buf(kInspectStep);
+    const std::size_t got = inspectRead(g_ins.start + g_ins.bytes.size(), buf.data(), buf.size());
+    g_ins.bytes.insert(g_ins.bytes.end(), buf.begin(), buf.begin() + got);
+    return got;
+}
+void inspectMark(HWND pane, long from, long to) {
+    CHARFORMAT2W cf{}; cf.cbSize = sizeof(cf);
+    cf.dwMask = CFM_COLOR | CFM_BOLD | CFM_BACKCOLOR; cf.crTextColor = kText; cf.crBackColor = kAccent; cf.dwEffects = CFE_BOLD;
+    SendMessageW(pane, EM_SETREADONLY, FALSE, 0);     // read-only rich edits ignore selection formats
+    SendMessageW(pane, EM_SETSEL, from, to);
+    SendMessageW(pane, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+    SendMessageW(pane, EM_SETSEL, from, from);
+    SendMessageW(pane, EM_SETREADONLY, TRUE, 0);
+}
+void inspectAlign(int top);
+void inspectRender(int top) {
+    std::wstring off, hex, asc;
+    const std::size_t n = g_ins.bytes.size();
+    int hitLine = -1;
+    for (std::size_t i = 0; i < n; i += 16) {
+        if (i) { off += L'\r'; hex += L'\r'; asc += L'\r'; }
+        wchar_t a[24]; _snwprintf_s(a, _TRUNCATE, L"%012llX", (unsigned long long)(g_ins.start + i));
+        off += a;
+        if (g_ins.hit >= g_ins.start + i && g_ins.hit < g_ins.start + i + 16) hitLine = int(i / 16);
+        for (std::size_t j = 0; j < 16 && i + j < n; ++j) {
+            wchar_t b[4]; _snwprintf_s(b, _TRUNCATE, j ? L" %02X" : L"%02X", unsigned(g_ins.bytes[i + j]));
+            hex += b;
+            const uint8_t c = g_ins.bytes[i + j];
+            asc += (c >= 32 && c <= 126) ? wchar_t(c) : L'.';
+        }
+    }
+    const std::wstring* texts[3] = {&off, &hex, &asc};
+    for (int k = 0; k < 3; ++k) {
+        SetWindowTextW(g_insPane[k], texts[k]->c_str());
+        CHARFORMAT2W cf{}; cf.cbSize = sizeof(cf); cf.dwMask = CFM_COLOR | CFM_BOLD | CFM_BACKCOLOR;
+        cf.crTextColor = kText; cf.crBackColor = kBg2;
+        SendMessageW(g_insPane[k], EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+    }
+    if (hitLine >= 0) {
+        const long col = long(g_ins.hit - (g_ins.start + uint64_t(hitLine) * 16));
+        /* every line before the hit is full: 12+1, 47+1 and 16+1 characters; EM_LINEINDEX
+           is no help here, rich edit lays the new text out later and answers -1 */
+        const long l0 = hitLine * 13L, l1 = hitLine * 48L, l2 = hitLine * 17L;
+        inspectMark(g_insPane[0], l0, l0 + 12);
+        inspectMark(g_insPane[1], l1 + col * 3, l1 + col * 3 + 2);
+        inspectMark(g_insPane[2], l2 + col, l2 + col + 1);
+    }
+    inspectAlign(std::max(0, top));
+    RedrawWindow(g_inspector ? g_inspector : GetParent(g_insPane[0]), nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    wchar_t info[160];
+    _snwprintf_s(info, _TRUNCATE, L"0x%llX - 0x%llX   (%zu bytes)   hit at 0x%llX",
+                 (unsigned long long)g_ins.start, (unsigned long long)(g_ins.start + n),
+                 n, (unsigned long long)g_ins.hit);
+    SetWindowTextW(g_insInfo, info);
+}
+/* all panes on one first line; panes clamp differently near the end, so the lowest wins */
+void inspectAlign(int top) {
+    g_insSyncing = true;
+    for (int pass = 0; pass < 2; ++pass) {
+        for (HWND o : g_insPane) if (o && IsWindow(o))
+            SendMessageW(o, EM_LINESCROLL, 0, top - (int)SendMessageW(o, EM_GETFIRSTVISIBLELINE, 0, 0));
+        for (HWND o : g_insPane) if (o && IsWindow(o)) top = std::min(top, (int)SendMessageW(o, EM_GETFIRSTVISIBLELINE, 0, 0));
+    }
+    g_insSyncing = false;
+}
+LRESULT CALLBACK insPaneSub(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
+    if (msg == WM_MOUSEWHEEL) {     /* scroll by lines here: RichEdit hands wheels to the window under the cursor */
+        UINT step = 3; SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &step, 0);
+        if (step == WHEEL_PAGESCROLL || step == 0) step = 3;
+        const int lines = -GET_WHEEL_DELTA_WPARAM(wp) * int(step) / WHEEL_DELTA;
+        inspectAlign(std::max(0, (int)SendMessageW(h, EM_GETFIRSTVISIBLELINE, 0, 0) + lines));
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(h, insPaneSub, 0);
+    LRESULT r = DefSubclassProc(h, msg, wp, lp);
+    const bool scrolls = msg == WM_VSCROLL || msg == WM_KEYDOWN || msg == WM_LBUTTONUP || msg == WM_TIMER ||
+                         (msg == WM_MOUSEMOVE && (wp & MK_LBUTTON));
+    if (scrolls && !g_insSyncing && g_inspector) inspectAlign((int)SendMessageW(h, EM_GETFIRSTVISIBLELINE, 0, 0));
+    return r;
+}
 LRESULT CALLBACK InspectorProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
         darkTitle(h);
-        peCtl(h, L"STATIC", L"Read-only bytes around the selected finding", 0, 0, 14, 12, 700, 24);
-        HWND view = peCtl(h, L"EDIT", g_inspectorText.c_str(), 0,
-            ES_MULTILINE | ES_READONLY | WS_BORDER | WS_VSCROLL | WS_HSCROLL,
-            14, 42, 750, 320);
-        SendMessageW(view, WM_SETFONT, (WPARAM)g_fontMono, TRUE);
-        peCtl(h, L"BUTTON", L"Close", IDCANCEL, BS_DEFPUSHBUTTON, 654, 374, 110, 30);
+        HDC dc = GetDC(h); HFONT of = (HFONT)SelectObject(dc, g_fontMono);
+        SIZE ch{}; GetTextExtentPoint32W(dc, L"0", 1, &ch);
+        SelectObject(dc, of); ReleaseDC(h, dc);
+        const int x0 = S(14), y0 = S(44), hgt = S(470), pad = S(10);
+        const int w[3] = { ch.cx * 13 + pad, ch.cx * 48 + pad, ch.cx * 17 + pad + GetSystemMetrics(SM_CXVSCROLL) };
+        g_insInfo = peCtl(h, L"STATIC", L"", IN_INFO, 0, 14, 12, 760, 24);
+        int x = x0;
+        for (int k = 0; k < 3; ++k) {
+            g_insPane[k] = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_MULTILINE | ES_READONLY | (k == 2 ? WS_VSCROLL : 0),
+                x, y0, w[k], hgt, h, nullptr, nullptr, nullptr);
+            SendMessageW(g_insPane[k], WM_SETFONT, (WPARAM)g_fontMono, TRUE);
+            SendMessageW(g_insPane[k], EM_SETBKGNDCOLOR, 0, (LPARAM)kBg2);
+            SendMessageW(g_insPane[k], EM_SETTARGETDEVICE, 0, 1);      // no word wrap: one line is 16 bytes
+            SendMessageW(g_insPane[k], EM_EXLIMITTEXT, 0, -1);          // more than the 32k default once grown
+            RECT pr{ pad / 2, S(4), w[k] - (k == 2 ? GetSystemMetrics(SM_CXVSCROLL) : 0) - pad / 2, hgt - S(4) };
+            SendMessageW(g_insPane[k], EM_SETRECT, 0, (LPARAM)&pr);
+            SetWindowSubclass(g_insPane[k], insPaneSub, 0, 0);
+            x += w[k] + S(6);
+        }
+        RECT cr; GetClientRect(h, &cr);
+        const int by = y0 + hgt + S(12);
+        CreateWindowExW(0, L"BUTTON", L"Load earlier 4 KiB", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                        x0, by, S(170), S(30), h, (HMENU)(INT_PTR)IN_EARLIER, nullptr, nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Load later 4 KiB", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                        x0 + S(180), by, S(170), S(30), h, (HMENU)(INT_PTR)IN_LATER, nullptr, nullptr);
+        CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                        cr.right - x0 - S(110), by, S(110), S(30), h, (HMENU)(INT_PTR)IDCANCEL, nullptr, nullptr);
+        for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT))
+            if (c != g_insPane[0] && c != g_insPane[1] && c != g_insPane[2]) {
+                SendMessageW(c, WM_SETFONT, (WPARAM)g_font, TRUE);
+                SetWindowTheme(c, L"DarkMode_Explorer", nullptr);
+            }
         return 0;
     }
-    case WM_COMMAND: if (LOWORD(wp) == IDCANCEL) { DestroyWindow(h); return 0; } break;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDCANCEL) { DestroyWindow(h); return 0; }
+        if (LOWORD(wp) == IN_EARLIER || LOWORD(wp) == IN_LATER) {
+            const int top = (int)SendMessageW(g_insPane[2], EM_GETFIRSTVISIBLELINE, 0, 0);
+            if (LOWORD(wp) == IN_EARLIER) {
+                const std::size_t got = inspectEarlier();
+                if (!got) { SetWindowTextW(g_insInfo, L"Nothing readable before this."); return 0; }
+                inspectRender(top + int(got / 16));
+            } else {
+                if (!inspectLater()) { SetWindowTextW(g_insInfo, L"Nothing readable after this."); return 0; }
+                inspectRender(top);
+            }
+            return 0;
+        }
+        break;
     case WM_CTLCOLORSTATIC: case WM_CTLCOLORBTN: {
         HDC dc = (HDC)wp; SetTextColor(dc, kText); SetBkColor(dc, kBg); return (LRESULT)g_bgBrush;
     }
-    case WM_CTLCOLOREDIT: {
-        HDC dc = (HDC)wp; SetTextColor(dc, kText); SetBkColor(dc, kBg2); return (LRESULT)g_bg2Brush;
-    }
     case WM_ERASEBKGND: { RECT r; GetClientRect(h, &r); FillRect((HDC)wp, &r, g_bgBrush); return 1; }
     case WM_CLOSE: DestroyWindow(h); return 0;
-    case WM_DESTROY: g_inspector = nullptr; EnableWindow(g_main, TRUE); SetForegroundWindow(g_main); return 0;
+    case WM_DESTROY:
+        g_inspector = nullptr; for (HWND& p : g_insPane) p = nullptr;
+        EnableWindow(g_main, TRUE); SetForegroundWindow(g_main); return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
-void showOffsetInspector(std::wstring text) {
-    g_inspectorText = std::move(text);
+void showOffsetInspector() {
     WNDCLASSEXW wc{sizeof(wc)}; wc.lpfnWndProc = InspectorProc;
     wc.hInstance = GetModuleHandleW(nullptr); wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = g_bgBrush; wc.lpszClassName = L"StringRipperOffsetInspector";
     RegisterClassExW(&wc);
-    RECT r{0, 0, S(778), S(415)};
+    HDC dc = GetDC(g_main); HFONT of = (HFONT)SelectObject(dc, g_fontMono);
+    SIZE ch{}; GetTextExtentPoint32W(dc, L"0", 1, &ch);
+    SelectObject(dc, of); ReleaseDC(g_main, dc);
+    const int width = S(14) * 2 + ch.cx * (13 + 48 + 17) + S(10) * 3 + GetSystemMetrics(SM_CXVSCROLL) + S(12);
+    RECT r{0, 0, std::max<int>(width, S(640)), S(570)};
     AdjustWindowRectEx(&r, WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_DLGMODALFRAME);
     EnableWindow(g_main, FALSE);
     g_inspector = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Offset inspector",
@@ -2125,6 +2415,7 @@ void showOffsetInspector(std::wstring text) {
         g_main, nullptr, wc.hInstance, nullptr);
     if (!g_inspector) { EnableWindow(g_main, TRUE); return; }
     ShowWindow(g_inspector, SW_SHOW); UpdateWindow(g_inspector);
+    inspectRender(int((g_ins.hit - g_ins.start) / 16) - 8);     /* after showing: marks set during WM_CREATE do not stick */
 }
 /* a process finding's pid: "(pid N)" in its source when several were scanned,
    and only while that process is still part of the shown results */
@@ -2136,49 +2427,26 @@ uint32_t findingPid(const ur::Finding& f) {
 }
 
 void inspectOffset(const ur::Finding& f, bool file) {
-    if (!f.hasOffset) return;
-    constexpr std::size_t kPreview = 256;
-    std::vector<uint8_t> bytes(kPreview);
-    uint64_t start = file && f.offset > 64 ? f.offset - 64 : f.offset;
-    std::size_t got = 0;
-    if (file) {
-        const auto path = ur::pathFromUtf8(f.source);
-        std::ifstream input(path ? *path : std::filesystem::path{}, std::ios::binary);
-        if (input) {
-            input.seekg(static_cast<std::streamoff>(start));
-            input.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
-            got = static_cast<std::size_t>(input.gcount());
-        }
-    } else if (uint32_t pid = findingPid(f)) {
-        fxchain::RipStats stats; fxchain::RipTargetInfo info;
-        fxchain::ripBackend().withReader(pid, stats, info, [&](fxchain::IMemoryReader& reader) {
-            auto result = reader.read(start, bytes.data(), bytes.size());
-            got = result.bytesRead;
-        });
+    if (!f.hasOffset || g_inspector) return;
+    g_ins = Inspect{};
+    g_ins.file = file;
+    if (file) { const auto path = ur::pathFromUtf8(f.source); if (path) g_ins.path = *path; }
+    else g_ins.pid = findingPid(f);
+    g_ins.hit = f.offset;
+    g_ins.start = (f.offset > kInspectStep / 2 ? f.offset - kInspectStep / 2 : 0) & ~uint64_t(15);
+    std::vector<uint8_t> buf(kInspectStep);
+    std::size_t got = inspectRead(g_ins.start, buf.data(), buf.size());
+    if (!got || g_ins.start + got <= f.offset) {
+        g_ins.start = f.offset & ~uint64_t(15);
+        got = inspectRead(g_ins.start, buf.data(), buf.size());
     }
     if (!got) {
         MessageBoxW(g_main, L"Source bytes are no longer readable.", L"Offset inspector", MB_ICONWARNING);
         return;
     }
-    std::wstring preview = L"Selected offset/address: 0x";
-    wchar_t address[32]; _snwprintf_s(address, _TRUNCATE, L"%llX\r\n\r\n", (unsigned long long)f.offset);
-    preview += address;
-    for (std::size_t i = 0; i < got; i += 16) {
-        wchar_t line[256];
-        _snwprintf_s(line, _TRUNCATE, L"%012llX  ", (unsigned long long)(start + i));
-        preview += line;
-        for (std::size_t j = 0; j < 16; ++j) {
-            if (i + j < got) {
-                wchar_t b[8]; _snwprintf_s(b, _TRUNCATE, L"%02X ", unsigned(bytes[i + j]));
-                preview += b;
-            } else preview += L"   ";
-        }
-        preview += L" |";
-        for (std::size_t j = 0; j < 16 && i + j < got; ++j)
-            preview += (bytes[i + j] >= 32 && bytes[i + j] <= 126) ? wchar_t(bytes[i + j]) : L'.';
-        preview += L"|\r\n";
-    }
-    showOffsetInspector(std::move(preview));
+    buf.resize(got);
+    g_ins.bytes = std::move(buf);
+    showOffsetInspector();
 }
 void showFindingMenu(ur::Finding f) {
     HMENU menu = CreatePopupMenu();
@@ -2221,9 +2489,9 @@ void copySelected() {
     std::string text;
     int i = -1;
     while ((i = ListView_GetNextItem(g_results, i, LVNI_SELECTED)) != -1) {
-        wchar_t buf[4096];
-        ListView_GetItemText(g_results, i, 0, buf, 4096);
-        text += narrow(buf);
+        const auto* f = findingAtRow(i);
+        if (!f) continue;
+        text += f->value;
         text += "\r\n";
     }
     if (text.empty()) return;
@@ -2260,7 +2528,7 @@ void saveAsTxt() {
         if (format == "sqlite") {
             try {
                 ur::SessionStore db(path);
-                auto id = db.saveSession({0, "Filtered export", "GUI results", "", g_viewResults});
+                auto id = db.saveSession({0, "Filtered export", "GUI results", "", g_viewHits});
                 SetWindowTextW(g_status, (L"Saved SQLite session " + std::to_wstring(id)).c_str());
             } catch (const std::exception& e) {
                 MessageBoxW(g_main, widen(e.what()).c_str(), L"SQLite export failed", MB_ICONERROR);
@@ -2271,7 +2539,7 @@ void saveAsTxt() {
         if (std::filesystem::exists(path, ec) &&
             MessageBoxW(g_main, L"Replace the existing export file?", L"Export results",
                         MB_YESNO | MB_ICONQUESTION) != IDYES) return;
-        if (!writeTextFile(path.wstring(), ur::exportResults(g_viewResults, format)))
+        if (!writeTextFile(path.wstring(), ur::exportResults(g_viewHits, format)))
             MessageBoxW(g_main, L"Could not write the file.", L"StringRipper", MB_ICONERROR);
     }
 }
@@ -2281,7 +2549,7 @@ void sendToEditor() {
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
     std::wstring p = std::wstring(tmp) + L"StringRipper-" + std::to_wstring(GetTickCount64()) + L".txt";
-    if (!writeTextFile(p, resultsToText(g_viewResults, g_lastMode))) {
+    if (!writeTextFile(p, resultsToText(g_viewHits, g_lastMode))) {
         MessageBoxW(g_main, L"Could not write the temp file.", L"StringRipper", MB_ICONERROR);
         return;
     }
@@ -2310,9 +2578,11 @@ void layout(int cw, int ch) {
     MoveWindow(g_file, right - fw - setW - sp, y, fw, rh, TRUE);
     MoveWindow(g_settingsButton, right - setW, y, setW, rh, TRUE);
     y += rh + S(5);
-    int aiw = textW(g_allInst, g_font) + S(24);
-    MoveWindow(g_allInst, right - aiw, y, aiw, rh, TRUE);
-    MoveWindow(g_source, m + S(6), y + S(4), cw - m * 2 - S(12) - aiw - sp, S(360), TRUE);   // 360 = dropdown height
+    int aiw = textW(g_allInst, g_font) + S(24), kw = textW(g_kill, g_font) + S(26), dmw = textW(g_dump, g_font) + S(26);
+    MoveWindow(g_kill, right - kw, y, kw, rh, TRUE);
+    MoveWindow(g_dump, right - kw - sp - dmw, y, dmw, rh, TRUE);
+    MoveWindow(g_allInst, right - kw - sp - dmw - sp - aiw, y, aiw, rh, TRUE);
+    MoveWindow(g_source, m + S(6), y + S(4), cw - m * 2 - S(12) - aiw - dmw - kw - sp * 3, S(360), TRUE);   // 360 = dropdown height
     { RECT cr2; GetWindowRect(g_source, &cr2); MapWindowPoints(nullptr, g_main, (POINT*)&cr2, 2);
       InflateRect(&cr2, S(6), S(4)); g_fields[1] = cr2; }
     y += rh + hg;
@@ -2336,11 +2606,14 @@ void layout(int cw, int ch) {
     const int cy = dy + rh + hg;
     MoveWindow(g_customLabel, m, cy + S(4), lw, lh, TRUE);
     g_fields[2] = { m + lw + sp, cy, right, cy + rh };
-    int pw = textW(g_presets, g_font) + S(26);
-    g_fields[2].right = right - pw - sp;
+    int pw = textW(g_presets, g_font) + S(26), pkw = S(240);
+    g_fields[2].right = right - pw - sp - pkw - sp;
     MoveWindow(g_presets, right - pw, cy, pw, rh, TRUE);
+    MoveWindow(g_presetPick, right - pw - sp - pkw + S(6), cy + S(4), pkw - S(12), S(300), TRUE);
+    { RECT pr; GetWindowRect(g_presetPick, &pr); MapWindowPoints(nullptr, g_main, (POINT*)&pr, 2);
+      InflateRect(&pr, S(6), S(4)); g_fields[4] = pr; }
     MoveWindow(g_custom, m + lw + sp + S(6), cy + S(4),
-               right - pw - sp - m - lw - sp - S(12), rh - S(8), TRUE);
+               g_fields[2].right - m - lw - sp - S(12), rh - S(8), TRUE);
     y = regex ? (cy + rh + gap) : (dy + rh + gap);
 
     // DECODE
@@ -2381,9 +2654,6 @@ void layout(int cw, int ch) {
 
     flow({g_copy, g_save, g_editor, g_clear}, m, bottom, S(26));
     int aw = textW(g_about, g_font) + S(26);
-    MoveWindow(g_pageNext, right - aw - S(84), bottom, S(78), rh, TRUE);
-    MoveWindow(g_pagePrev, right - aw - S(170), bottom, S(78), rh, TRUE);
-    MoveWindow(g_pageLabel, right - aw - S(245), bottom + S(7), S(70), lh, TRUE);
     MoveWindow(g_about, right - aw, bottom, aw, rh, TRUE);
 
 }
@@ -2518,6 +2788,70 @@ void startUpdateDownload() {
     g_updateThread = std::thread([]{ runUpdateDownload(); g_updateBusy = false; });
 }
 
+/* the selected process as a full-memory minidump, written off the UI thread */
+void dumpSelected() {
+    const uint32_t pid = selectedPid();
+    if (!pid) { MessageBoxW(g_main, L"Choose a process first.", L"Dump", MB_ICONINFORMATION); return; }
+    if (pid == GetCurrentProcessId()) { MessageBoxW(g_main, L"StringRipper cannot dump itself.", L"Dump", MB_ICONINFORMATION); return; }
+    if (g_dumpThread.joinable()) return;
+    std::wstring name = widen(fxchain::ripBackend().processName(pid));
+    if (name.empty()) name = L"process";
+    wchar_t file[MAX_PATH]{};
+    _snwprintf_s(file, _TRUNCATE, L"%s-%u.dmp", std::filesystem::path(name).stem().c_str(), pid);
+    OPENFILENAMEW ofn{ sizeof(ofn) };
+    ofn.hwndOwner = g_main; ofn.lpstrFile = file; ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrFilter = L"Minidump (*.dmp)\0*.dmp\0All files\0*.*\0"; ofn.lpstrDefExt = L"dmp";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameW(&ofn)) return;
+    g_dumpPath = file;
+    EnableWindow(g_dump, FALSE); InvalidateRect(g_dump, nullptr, TRUE);
+    SetWindowTextW(g_status, (L"Writing dump of " + name + L"...").c_str());
+    g_dumpThread = std::thread([pid, path = g_dumpPath] {
+        DWORD err = 0; BOOL ok = FALSE;
+        HANDLE proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+        if (!proc) err = GetLastError();
+        else {
+            HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (f == INVALID_HANDLE_VALUE) err = GetLastError();
+            else {
+                MINIDUMP_CALLBACK_INFORMATION cb{};
+                cb.CallbackRoutine = [](PVOID, PMINIDUMP_CALLBACK_INPUT in, PMINIDUMP_CALLBACK_OUTPUT out) -> BOOL {
+                    if (in && out && in->CallbackType == CancelCallback) { out->Cancel = g_closing.load(); out->CheckCancel = TRUE; }
+                    return TRUE;    /* closing the window stops a long dump */
+                };
+                ok = MiniDumpWriteDump(proc, pid, f, (MINIDUMP_TYPE)(MiniDumpWithFullMemory | MiniDumpWithFullMemoryInfo |
+                                       MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules), nullptr, nullptr, &cb);
+                if (!ok) err = GetLastError();
+                CloseHandle(f);
+                if (!ok) DeleteFileW(path.c_str());
+            }
+            CloseHandle(proc);
+        }
+        PostMessageW(g_main, WM_APP_DUMP_DONE, ok ? 1 : 0, (LPARAM)err);
+    });
+}
+void killSelected() {
+    const uint32_t pid = selectedPid();
+    if (!pid) { MessageBoxW(g_main, L"Choose a process first.", L"Kill", MB_ICONINFORMATION); return; }
+    if (pid == GetCurrentProcessId()) { MessageBoxW(g_main, L"That is StringRipper itself.", L"Kill", MB_ICONINFORMATION); return; }
+    std::wstring name = widen(fxchain::ripBackend().processName(pid));
+    std::wstring ask = L"End " + name + L" (pid " + std::to_wstring(pid) + L")?\r\n\r\nUnsaved work in that program is lost.";
+    if (MessageBoxW(g_main, ask.c_str(), L"Kill process", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+    if (!h || !TerminateProcess(h, 1)) {
+        const DWORD err = GetLastError();
+        if (h) CloseHandle(h);
+        std::wstring why = L"Could not end " + name + L" (error " + std::to_wstring(err) + L").";
+        if (err == ERROR_ACCESS_DENIED && !g_elevated) why += L"\r\n\r\nIt runs with higher rights: start StringRipper as administrator.";
+        MessageBoxW(g_main, why.c_str(), L"Kill process", MB_ICONWARNING);
+        return;
+    }
+    WaitForSingleObject(h, 3000);
+    CloseHandle(h);
+    autoRefreshProcs();
+    SetWindowTextW(g_status, (L"Ended " + name + L" (pid " + std::to_wstring(pid) + L").").c_str());
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_CREATE: {
@@ -2540,6 +2874,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_settingsButton = mkPush(hwnd, L"Scan settings...", ID_SCAN_SETTINGS);
         g_allInst = mkChip(hwnd, L"All instances", ID_ALL_INSTANCES);
         setChecked(g_allInst, false);
+        g_dump = mkPush(hwnd, L"Dump...", ID_DUMP);
+        g_kill = mkPush(hwnd, L"Kill...", ID_KILL);
         g_srcInfo = mkStatic(hwnd, L"Drop files or folders on the window, or scan the selected process.");
 
         g_secFind = mkSection(hwnd, L"WHAT TO FIND");
@@ -2564,7 +2900,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_custom = CreateWindowExW(0, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, (HMENU)ID_CUSTOM, nullptr, nullptr);
         SendMessageW(g_custom, EM_SETCUEBANNER, TRUE, (LPARAM)L"your own regex (ECMAScript)...");
-        g_presets = mkPush(hwnd, L"User presets...", ID_PRESETS);
+        g_presets = mkPush(hwnd, L"Edit user presets...", ID_PRESETS);
+        g_presetPick = CreateWindowExW(0, L"COMBOBOX", L"",
+            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
+            0, 0, 0, 0, hwnd, (HMENU)ID_PRESET_PICK, nullptr, nullptr);
+        SetWindowTheme(g_presetPick, L"DarkMode_CFD", nullptr);
+        SendMessageW(g_presetPick, WM_SETFONT, (WPARAM)g_font, FALSE);
 
         g_secDecode = mkSection(hwnd, L"DECODE");
         g_ascii = mkChip(hwnd, L"ASCII", ID_ENC_ASCII);
@@ -2595,7 +2936,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_dashboard = mkPush(hwnd, L"Dashboard", ID_DASHBOARD);
         setChecked(g_newOnly, false); EnableWindow(g_newOnly, FALSE);
         g_results = CreateWindowExW(0, WC_LISTVIEWW, L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_OWNERDATA,
             0, 0, 0, 0, hwnd, (HMENU)ID_RESULTS, nullptr, nullptr);
         ListView_SetExtendedListViewStyle(g_results, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
         SetWindowTheme(g_results, L"DarkMode_Explorer", nullptr);
@@ -2616,7 +2957,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_pagePrev = mkPush(hwnd, L"Previous", ID_PAGE_PREV);
         g_pageNext = mkPush(hwnd, L"Next", ID_PAGE_NEXT);
         g_pageLabel = mkStatic(hwnd, L"1 / 1");
-        EnableWindow(g_pagePrev, FALSE); EnableWindow(g_pageNext, FALSE);
+        for (HWND h : {g_pagePrev, g_pageNext, g_pageLabel}) ShowWindow(h, SW_HIDE);   // one list now, no pages
         g_about = mkPush(hwnd, L"About", ID_ABOUT);
         enableResultActions(false);
 
@@ -2657,11 +2998,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 loaded = recovered;
             }
             if (loaded && !g_userPresets.empty()) {
-                applyUserPreset(g_userPresets.front());
                 if (recovered) SetWindowTextW(g_status, L"Preset file was invalid; loaded the .bak copy.");
             } else if (!e.empty())
                 SetWindowTextW(g_status, widen(std::string("Preset file: ") + e).c_str());
         }
+        fillPresetPick();
+        RegisterDragDrop(g_filter, &g_filterDrop);
         SetTimer(hwnd, TIMER_PROCS, 2000, nullptr);
         if (g_autoRipPid) {
             selectPid(g_autoRipPid);
@@ -2747,8 +3089,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
         roundRect(dc, g_segRect, S(20), kBg, kBSub);
-        for (int i = 0; i < 4; ++i) {
-            if (i == 2 && !IsWindowVisible(g_custom)) continue;
+        for (int i = 0; i < 5; ++i) {
+            if ((i == 2 && !IsWindowVisible(g_custom)) || (i == 4 && !IsWindowVisible(g_presetPick))) continue;
             roundRect(dc, g_fields[i], S(20), kBg2, kBSub);
         }
         roundRect(dc, g_listCard, S(26), kCard, kBSub);
@@ -2763,20 +3105,22 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND:
         switch (LOWORD(wp)) {
         case ID_SEARCH: if (HIWORD(wp) == EN_CHANGE) applyProcFilter(); break;
-        case ID_FILTER: if (HIWORD(wp) == EN_CHANGE) applyResultFilter(); break;
+        case ID_FILTER: if (HIWORD(wp) == EN_CHANGE) applyResultFilter(false); break;
         case ID_REFRESH: refreshProcesses(); break;
         case ID_FILE: pickFile(); break;
         case ID_SCAN_SETTINGS: showScanSettings(); break;
         case ID_PRESETS: showPresetEditor(); break;
         case ID_WORKSPACE: showWorkspace(); break;
         case ID_DASHBOARD: showDashboard(); break;
-        case ID_MODE_URL: case ID_MODE_REGEX: {
-            bool url = LOWORD(wp) == ID_MODE_URL;
-            setChecked(g_modeUrl, url);
-            setChecked(g_modeRegex, !url);
-            updateModeVisibility(); relayout(hwnd);
+        case ID_MODE_URL: case ID_MODE_REGEX: switchMode(LOWORD(wp) == ID_MODE_REGEX); break;
+        case ID_PRESET_PICK:
+            if (HIWORD(wp) == CBN_SELCHANGE) {
+                int sel = (int)SendMessageW(g_presetPick, CB_GETCURSEL, 0, 0);
+                if (sel > 0 && sel <= (int)g_userPresets.size()) applyUserPreset(g_userPresets[sel - 1]);
+            }
             break;
-        }
+        case ID_DUMP: dumpSelected(); break;
+        case ID_KILL: killSelected(); break;
         case ID_SCAN: doScan(); break;
         case ID_PAUSE:
             g_scanGate.setPaused(!g_scanGate.paused());
@@ -2792,8 +3136,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_EDITOR: sendToEditor(); break;
         case ID_ABOUT: showAbout(); break;
         case ID_CLEAR: clearResults(); break;
-        case ID_PAGE_PREV: if (g_page) { --g_page; populateResults(g_viewResults); } break;
-        case ID_PAGE_NEXT: ++g_page; populateResults(g_viewResults); break;
         case ID_NEW_ONLY:
             setChecked(g_newOnly, !isChecked(g_newOnly)); applyResultFilter(); break;
         case ID_ALL_INSTANCES: setChecked(g_allInst, !isChecked(g_allInst)); break;
@@ -2808,7 +3150,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case ID_CUSTOM:
             if (HIWORD(wp) == EN_CHANGE) {
-                if (!g_applyingPreset) g_activePreset.clear();
+                if (!g_applyingPreset) { g_activePreset.clear(); SendMessageW(g_presetPick, CB_SETCURSEL, 0, 0); }
                 if (GetWindowTextLengthW(g_custom) > 0) setRegexMode();
             }
             break;
@@ -2849,47 +3191,48 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        if (hdr->idFrom == ID_RESULTS && hdr->code == LVN_GETDISPINFOW) {
+            auto* di = (NMLVDISPINFOW*)lp;
+            if ((di->item.mask & LVIF_TEXT) && di->item.pszText && di->item.cchTextMax > 0) {
+                std::wstring t = rowText(di->item.iItem, di->item.iSubItem);
+                wcsncpy_s(di->item.pszText, di->item.cchTextMax, t.c_str(), _TRUNCATE);
+            }
+            return 0;
+        }
+        if (hdr->idFrom == ID_RESULTS && hdr->code == LVN_ODFINDITEMW) {
+            return -1;      /* no type-ahead: keep the selection where it is */
+        }
+        if (hdr->idFrom == ID_RESULTS && hdr->code == LVN_BEGINDRAG) {
+            dragText(rowText(((NMLISTVIEW*)lp)->iItem, 0));
+            return 0;
+        }
         auto* cd = (NMLVCUSTOMDRAW*)lp;
         if (cd->nmcd.hdr.idFrom != ID_RESULTS || cd->nmcd.hdr.code != NM_CUSTOMDRAW) break;
         if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-        if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) return CDRF_NOTIFYSUBITEMDRAW;
-        if (cd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
-            if (cd->iSubItem == 0) { SelectObject(cd->nmcd.hdc, g_fontMono); return CDRF_NEWFONT; }
-            if (cd->iSubItem == 1) {
-                HWND lv = cd->nmcd.hdr.hwndFrom;
-                const int row = (int)cd->nmcd.dwItemSpec;
-                wchar_t t[32] = L"";
-                ListView_GetItemText(lv, row, 1, t, 32);
-                RECT r{};
-                ListView_GetSubItemRect(lv, row, 1, LVIR_BOUNDS, &r);
-                HDC hdc = cd->nmcd.hdc;
-                HBRUSH b = CreateSolidBrush(kCard);
-                FillRect(hdc, &r, b);
-                DeleteObject(b);
-                if (!t[0]) return CDRF_SKIPDEFAULT;
-                HFONT of = (HFONT)SelectObject(hdc, g_font);
-                SIZE sz{};
-                GetTextExtentPoint32W(hdc, t, (int)wcslen(t), &sz);
-                SelectObject(hdc, of);
-                const int ch = S(20);
-                RECT chip{ r.left + S(6), (r.top + r.bottom - ch) / 2, 0, 0 };
-                chip.right = chip.left + sz.cx + S(14);
-                chip.bottom = chip.top + ch;
-                roundRect(hdc, chip, S(12), kBg3, kBg3);
-                inkText(hdc, t, chip, g_font, kText2, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-                return CDRF_SKIPDEFAULT;
-            }
-            if (cd->iSubItem == 2) {
-                SelectObject(cd->nmcd.hdc, g_fontMono);
-                cd->clrText = kText3;
-                return CDRF_NEWFONT;
-            }
+        if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+            drawResultRow(cd->nmcd.hdr.hwndFrom, cd->nmcd.hdc, (int)cd->nmcd.dwItemSpec);
+            return CDRF_SKIPDEFAULT;
         }
         return CDRF_DODEFAULT;
     }
     case WM_APP_DONE:
         onDone((std::vector<ur::Group>*)lp);
         return 0;
+    case WM_APP_DUMP_DONE: {
+        if (g_dumpThread.joinable()) g_dumpThread.join();
+        EnableWindow(g_dump, !g_scanning); InvalidateRect(g_dump, nullptr, TRUE);
+        if (wp) {
+            std::error_code ec;
+            const auto mb = std::filesystem::file_size(g_dumpPath, ec) / (1024 * 1024);
+            SetWindowTextW(g_status, (L"Dump written: " + g_dumpPath + L"  (" + std::to_wstring(mb) + L" MB)").c_str());
+        } else {
+            std::wstring why = L"Could not write the dump (error " + std::to_wstring((DWORD)lp) + L").";
+            if ((DWORD)lp == ERROR_ACCESS_DENIED && !g_elevated) why += L"\r\n\r\nIt runs with higher rights: start StringRipper as administrator.";
+            SetWindowTextW(g_status, L"Dump failed.");
+            MessageBoxW(hwnd, why.c_str(), L"Dump", MB_ICONWARNING);
+        }
+        return 0;
+    }
     case WM_APP_UPDATE_FOUND: {
         const bool manualOnly = lp == 2;
         std::wstring msg = L"StringRipper " + widen(g_update.version) +
@@ -2949,10 +3292,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY:
-        g_cancelFlag = true;
+        g_cancelFlag = true; g_closing = true;
         g_updateCancel = true;
         g_scanGate.setPaused(false);
+        RevokeDragDrop(g_filter);
         if (g_scanThread.joinable()) g_scanThread.join();
+        if (g_dumpThread.joinable()) g_dumpThread.join();
         if (g_updateThread.joinable()) g_updateThread.join();
         if (!g_updateDownloadPath.empty()) {
             std::error_code ec; std::filesystem::remove(g_updateDownloadPath, ec);
@@ -2973,6 +3318,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int runGui(HINSTANCE hInst) {
+    OleInitialize(nullptr);
+    LoadLibraryW(L"Msftedit.dll");
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_LISTVIEW_CLASSES | ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);
 
@@ -3016,6 +3363,10 @@ int runGui(HINSTANCE hInst) {
 
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+        if (m.message == WM_KEYDOWN && m.wParam == VK_ESCAPE) {    /* Esc closes what has nothing to save */
+            HWND root = GetAncestor(m.hwnd, GA_ROOT);
+            if (root && (root == g_inspector || root == g_dashboardWindow || root == g_ws)) { PostMessageW(root, WM_CLOSE, 0, 0); continue; }
+        }
         if (g_pe && IsDialogMessageW(g_pe, &m)) continue;
         if (IsDialogMessageW(g_main, &m)) continue;
         TranslateMessage(&m);

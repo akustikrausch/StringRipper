@@ -57,6 +57,7 @@ struct Finding {
     bool hasOffset = false;
     std::string before, after;
     std::vector<std::pair<std::string, std::string>> captures;
+    std::size_t occurrences = 1;   // >1 once the GUI folds repeats of a value
 };
 
 inline std::string findingKey(const std::string& group, const std::string& value,
@@ -91,7 +92,7 @@ inline const std::vector<Preset>& builtinPresets() {
         {"ipv6",     "IPv6 address",  R"(\b(?:[A-Fa-f0-9]{1,4}:){2,7}[A-Fa-f0-9]{1,4}\b)"},
         {"guid",     "GUID",          R"(\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b)"},
         {"apikey",   "API key",       R"(\b(?:AKIA[0-9A-Z]{16}|gh[opusr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9\-]{10,}|sk_(?:live|test)_[A-Za-z0-9]{16,})\b)"},
-        {"filepath", "File path",     R"((?:[A-Za-z]:\\|\\\\)[^\r\n"<>|?*\x00]{2,})"},
+        {"filepath", "File path",     R"((?:\b[A-Za-z]:\\|\\\\)[^\r\n"<>|?*\x00]{2,})"},
         {"fileurl",  "Download URL",  R"((?:[A-Za-z0-9._~:/?#@!$&'()*+,;=%\-]|[\xC3-\xC9][\x80-\xBF]){2,}\.(?:exe|msi|zip|7z|rar|gz|tgz|tar|bz2|xz|dmg|pkg|app|iso|deb|rpm|apk|cab|jar|whl|nupkg|vsix|appimage|bin|run)\b)"},
     };
     return p;
@@ -559,6 +560,8 @@ inline bool endsWith(const std::string& s, const std::string& suf) {
 /* obvious noise: placeholder hosts, reserved TLDs, and the XML/namespace domains
    that flood a memory dump. host is already lowercased and plausible. */
 inline bool looksCrap(const std::string& h) {
+    /* www. and one word: dictionary text (the Brotli one in wininet.dll), never a site */
+    if (h.size() > 4 && h.compare(0, 4, "www.") == 0 && h.find('.', 4) == std::string::npos) return true;
     static const char* exact[] = {
         "example.com", "example.org", "example.net", "example.edu",
         "localhost", "127.0.0.1", "0.0.0.0", "domain.com", "test.com",

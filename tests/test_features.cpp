@@ -92,6 +92,19 @@ int main(int argc, char** argv) {
     CHECK(json.find("\"encoding\":\"ASCII\"") != std::string::npos);
     CHECK(json.find("\"source\":\"before\"") != std::string::npos);
     CHECK(json.find("\"offset\":null") != std::string::npos);
+    {
+        // the same value in one group shows once, counted; the first occurrence stays
+        auto f = [](std::string v, std::string src, uint64_t off) { ur::Finding x{}; x.value = v; x.source = src; x.offset = off; x.hasOffset = true; return x; };
+        ur::Group g{"host.tld", {f("https://host.tld/a", "app [stack]", 40), f("https://host.tld/b", "app [heap]", 20),
+                                 f("https://host.tld/a", "app [private]", 30), f("https://host.tld/a", "app [heap]", 10)}};
+        auto folded = ur::foldDuplicates({g});
+        CHECK(folded.size() == 1 && folded[0].items.size() == 2);
+        CHECK(folded[0].items[0].value == "https://host.tld/a" && folded[0].items[0].occurrences == 3);
+        CHECK(folded[0].items[0].source == "app [heap]" && folded[0].items[0].offset == 10);   // first by source and offset, not by arrival
+        CHECK(folded[0].items[1].occurrences == 1);
+        CHECK(ur::foldDuplicates(folded)[0].items[0].occurrences == 3);                       // folding twice is stable
+        CHECK(ur::exportResults({g}, "csv").find("occurrences") == std::string::npos);        // exports keep every hit, format unchanged
+    }
     auto stats = ur::summarizeResults({a, b});
     CHECK(stats.findings == 3 && stats.byGroup.at("Tickets") == 3);
     CHECK(stats.bySource.at("before") == 1 && stats.byEncoding.at("ASCII") == 2);
