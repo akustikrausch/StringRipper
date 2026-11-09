@@ -2,13 +2,15 @@
 
 Small Windows tool for ripping strings out of running processes, files or whole folders.
 
+![A running process scanned for URLs, each hit with the module and section it sat in](docs/img/process-scan.png)
+
 Give it a process and it digs through readable memory looking for URLs or whatever regex you throw at it. Works with ASCII/ANSI/UTF-8, UTF-16 LE/BE and also unwraps one layer of Base64, hex or escaping along the way. So `https:\/\/`, `https%3A%2F%2F` and `\u002F` from JSON blobs and query strings come out as plain URLs.
 
 Umlauts and other non-ASCII letters stay inside the string, `C:\Users\Jürgen\...` comes out whole instead of cut at the ü. UTF-8, ANSI and UTF-16 alike. Same in URLs: a path like `/ufs/Pulsación.rar` keeps its `ó`, also in the Download preset. Host names stay ASCII. A lone non-ASCII word with nothing ASCII around it is still missed, that keeps random memory from turning into fake text.
 
 **All instances** scans every process with the selected name in one go. Browsers like to spawn twenty of them. Each hit then says which pid it came from.
 
-Memory hits also say where they sat: `xul.dll .rdata`, `mapped foo.dat`, `stack`, `heap` or `private`. It's part of the source, so the filter box finds them. `heap` means the process heaps' base segments, everything else unnamed stays `private`.
+Memory hits also say where they sat: `app.dll .rdata`, `mapped foo.dat`, `stack`, `heap` or `private`. It's part of the source, so the filter box finds them. `heap` means the process heaps' base segments, everything else unnamed stays `private`.
 
 One portable exe. No installer, no DLL mess. Really portable: workspace, update settings and presets live in a `data` folder next to the exe (`workspace.sqlite`, `update.ini`, `regex-user-presets.ini`), so the folder is the whole install. Copy it to a stick and everything comes along. In a folder you can't write to (Program Files) it uses `%LOCALAPPDATA%\StringRipper\data`, About tells you which. Older layouts move in on first start: the 1.3.0 files next to the exe and a dropped-in `regex-user-presets.ini` go into `data`, 1.2.x app data is copied once.
 
@@ -49,7 +51,7 @@ Custom=1
 
 ## Workspace
 
-**Workspace...** keeps scan sessions in a local SQLite file (`StringRipper.workspace.sqlite` next to the exe), compares two sessions side by side (added, removed, unchanged) and saves named jobs: sources, profile, file filter, live interval. Process jobs follow the program name across restarts; old PID-only jobs need to be saved again. Favorite processes and paths live there too, and so does the ignore list. **Dashboard** counts findings by pattern, source and encoding. Nothing leaves your machine.
+**Workspace...** keeps scan sessions in a local SQLite file (`data\workspace.sqlite` next to the exe), compares two sessions side by side (added, removed, unchanged) and saves named jobs: sources, profile, file filter, live interval. Process jobs follow the program name across restarts; old PID-only jobs need to be saved again. Favorite processes and paths live there too, and so does the ignore list. **Dashboard** counts findings by pattern, source and encoding. Nothing leaves your machine.
 
 Direct ASCII/UTF-16 hits and unescaped ones carry their file offset or memory address, a bit of context and named captures like `(?<version>...)`. Double-click a hit for details, right-click to inspect the bytes, open the source file or favorite the source. The byte inspector shows offsets, hex and ASCII in three panes that scroll together, so selecting in the hex or ASCII pane copies just that, no offsets or dividers. It starts with 4 KiB around the hit, marked, and loads 4 KiB more either way. Decoded Base64/hex hits don't claim an offset.
 
@@ -69,6 +71,13 @@ Case doesn't matter. The CLI takes the same rules with `--ignore`, repeatable.
 **Scan settings...** filters files by include/exclude glob (`*.txt,*.log`, `logs/*.txt`), size, modified date (YYYY-MM-DD) or byte/address range. **Pause/Resume** freezes producer and workers without losing queued work. **Live** rescans every N seconds and tells you what got added, removed, unchanged. **New only** shows what appeared since the last complete scan of the same source with the same options. Cancelled or failed scans never replace that baseline, Clear resets it.
 
 All results sit in one list, no pages, and it stays quick with a few hundred thousand rows. The same value found again (another memory region, another encoding) is folded into one row with a count like `×50`, details and inspection use its first hit by source and offset, the filter looks at every hit. URL mode and regex mode keep their own results, switching shows each mode's last scan. Selected rows are grey, not white. Filter by value, pattern, source or encoding, or drag a row onto the filter field: a row gives its value, a group header its host. The filter takes text dropped from anywhere, also a selection from the byte inspector.
+
+| | |
+|---|---|
+| ![URLs unwrapped from JSON escapes, percent-encoding, Base64 and hex](docs/img/decoders.png) | ![Regex mode with presets and the preset dropdown](docs/img/regex.png) |
+| Decoders: escaped, percent-encoded, Base64 and hex URLs come out plain | Regex mode: presets, your own pattern, the preset dropdown |
+
+![Byte inspector with offset, hex and ASCII panes and the hit marked](docs/img/inspector.png)
 
 **Dump...** saves the selected process as a full-memory minidump (`.dmp`, opens in WinDbg or Visual Studio, and StringRipper scans it like any file). **Kill...** ends the selected process after asking. Esc closes the inspector, dashboard, workspace and details; windows with Save or Apply stay open.
 
