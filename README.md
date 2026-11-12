@@ -25,7 +25,7 @@ Regex mode has presets for the usual stuff: email, IPv4/IPv6, GUIDs, API keys, f
 
 ## User presets
 
-StringRipper always starts in URL mode. In regex mode the custom field starts empty and a dropdown next to it lists your presets, one click applies one. Drop a `regex-user-presets.ini` next to the exe and it moves into `data` on first start. **Edit user presets...** creates, edits, validates and saves them, decoder and built-in switches included. Unsaved edits stay until you save or discard. The editor resizes and maximizes; while it's open the main window waits in the taskbar and comes back when you close it.
+StringRipper always starts in URL mode. In regex mode the custom field starts empty and a dropdown next to it lists your presets in your order, one click applies one. Drop a `regex-user-presets.ini` next to the exe and it moves into `data` on first start. **Edit user presets...** creates, edits, validates and saves them, decoder and built-in switches included. The list is numbered; **Up**, **Down** and **Sort A-Z** set the order, which the file and the dropdown follow after **Save all**. Unsaved edits stay until you save or discard. The editor resizes and maximizes; while it's open the main window waits in the taskbar and comes back when you close it.
 
 Presets can carry example lines. **Test sample** runs the patterns against pasted text (2048 chars, not saved), **Run saved cases** checks every saved line, **Add to profile** stacks presets into one scan.
 
@@ -70,7 +70,15 @@ Case doesn't matter. The CLI takes the same rules with `--ignore`, repeatable.
 
 **Scan settings...** filters files by include/exclude glob (`*.txt,*.log`, `logs/*.txt`), size, modified date (YYYY-MM-DD) or byte/address range. **Pause/Resume** freezes producer and workers without losing queued work. **Live** rescans every N seconds and tells you what got added, removed, unchanged. **New only** shows what appeared since the last complete scan of the same source with the same options. Cancelled or failed scans never replace that baseline, Clear resets it.
 
-All results sit in one list, no pages, and it stays quick with a few hundred thousand rows. The same value found again (another memory region, another encoding) is folded into one row with a count like `×50`, details and inspection use its first hit by source and offset, the filter looks at every hit. URL mode and regex mode keep their own results, switching shows each mode's last scan. Selected rows are grey, not white. Filter by value, pattern, source or encoding, or drag a row onto the filter field: a row gives its value, a group header its host. The filter takes text dropped from anywhere, also a selection from the byte inspector.
+## Results
+
+All results sit in one list, no pages, and it stays quick with a few hundred thousand rows. The same value found again (another memory region, another encoding) is folded into one row with a count like `×50`, details and inspection use its first hit by source and offset, the filter looks at every hit. Selected rows are grey, not white.
+
+URL mode and regex mode keep their own results and their own filter text, switching shows each mode's last scan with the filter you left there.
+
+**Copy all** sits right of the count on every group header: one click copies every value the list shows for that host, once each, one per line. Same thing in the header's right-click menu.
+
+Filter by value, pattern, source or encoding, or drag a row onto the filter field: a row gives its value, a group header its host. The filter takes text dropped from anywhere, also a selection from the byte inspector.
 
 | | |
 |---|---|
@@ -79,7 +87,13 @@ All results sit in one list, no pages, and it stays quick with a few hundred tho
 
 ![Byte inspector with offset, hex and ASCII panes and the hit marked](docs/img/inspector.png)
 
-**Dump...** saves the selected process as a full-memory minidump (`.dmp`, opens in WinDbg or Visual Studio, and StringRipper scans it like any file). **Kill...** ends the selected process after asking. Esc closes the inspector, dashboard, workspace and details; windows with Save or Apply stay open.
+## Process tools
+
+Bottom right, next to About, a small meter shows the whole system's CPU and GPU load, updated once a second. Hover it to see how much of that is StringRipper itself.
+
+**Dump...** saves the selected process as a full-memory minidump (`.dmp`, opens in WinDbg or Visual Studio, and StringRipper scans it like any file). **Kill...** ends the selected process after asking. Windows' own core processes (System, csrss, lsass, winlogon and friends) are refused outright, other programs from the Windows folder and services get a second warning that defaults to No.
+
+Esc closes the inspector, dashboard, workspace and details; windows with Save or Apply stay open.
 
 ## Regex limits
 
@@ -87,17 +101,18 @@ Regex scans run in overlapping 1024-char windows. Hits over 512 chars aren't ret
 
 ## Export
 
-**Export...** writes TXT, CSV, JSON or appends a SQLite session, and only what the filter currently shows. Folding is for the list only: exports, the dashboard and saved sessions keep every single hit. CSV/JSON carry offsets, context and captures. CSV cells starting with `=`, `+`, `-` or `@` get a leading quote so Excel doesn't run them.
+**Export...** writes TXT, CSV, JSON or appends a SQLite session, and only what the filter currently shows. TXT and **Send to editor** write the list as you see it: each value once, no offsets. CSV, JSON and SQLite keep every single hit with offsets, context and captures, so do the dashboard and saved sessions. CSV cells starting with `=`, `+`, `-` or `@` get a leading quote so Excel doesn't run them.
 Invalid bytes are escaped in JSON and NUL bytes in CSV; console output keeps the same bytes as a saved export.
 
-Findings stay plain text. No clickable URLs. `Export...` and `Send to editor` write straight to disk and never touch the clipboard. This is intentional... some download managers love watching the clipboard and immediately grabbing every URL they see. `Copy selected` is the only thing that puts anything there.
+Findings stay plain text. No clickable URLs. `Export...` and `Send to editor` write straight to disk and never touch the clipboard. This is intentional... some download managers love watching the clipboard and immediately grabbing every URL they see. `Copy selected` and `Copy all` are the only things that put anything there.
 
 It only reads memory the current user is allowed to open. No injection, no writing into other processes, no messing around with the Windows security stuff.
 
 Export looks basically like this:
 
 ```text
-example.com (3)
+example.com  (3)
+
 https://example.com/foo
 https://example.com/bar
 https://example.com/baz
@@ -145,7 +160,7 @@ Run it without arguments for the GUI. Pick or filter a process or file, choose U
 
 Drop files or folders on the window or straight on the exe. Several at once is fine, folders get walked. On the window it only sets the source and you hit Scan, on the exe it scans right away. Only one instance runs, a second launch hands its files to the first and bows out, so scans never race.
 
-The process list follows programs as they come and go, and if the process you scanned exits the results clear themselves (with All instances: once the last one is gone). Progress shows a percent with two decimals, against a plan made up front: file sizes, or the readable memory regions of a process (first 2 GiB). Pause and Cancel take effect between work chunks. Crap filter (on by default in URL mode) drops placeholder and XML-namespace hosts. The Download preset catches partial URLs ending in .exe/.zip/.dmg/.pkg and the like. A bare path like `/downloads/tool/setup_2_1.zip` gets the host of a full URL from the same process or file that shares its folder (`https://cdn.example.com/downloads/tool/...`). No shared folder, or two hosts equally likely: it stays a path. The details say which URL the host came from.
+The process list follows programs as they come and go (rebuilt when you open it or search, so an idle window stays idle), and if the process you scanned exits the results clear themselves (with All instances: once the last one is gone). Progress shows a percent with two decimals, against a plan made up front: file sizes, or the readable memory regions of a process (first 2 GiB). Pause and Cancel take effect between work chunks. Crap filter (on by default in URL mode) drops placeholder and XML-namespace hosts. The Download preset catches partial URLs ending in .exe/.zip/.dmg/.pkg and the like. A bare path like `/downloads/tool/setup_2_1.zip` gets the host of a full URL from the same process or file that shares its folder (`https://cdn.example.com/downloads/tool/...`). No shared folder, or two hosts equally likely: it stays a path. The details say which URL the host came from.
 
 Audit notes, tests and benchmark instructions are in [docs/AUDIT-1.2.md](docs/AUDIT-1.2.md).
 
@@ -188,6 +203,7 @@ The exe asks for nothing at startup, it runs as whoever started it (the manifest
 - `src/scan_driver.hpp` - worker pool for memory + files
 - `src/scan_service.hpp` - shared file-scan use case for GUI and CLI
 - `src/process_scan_win32.hpp` - Windows process-reader adapter
+- `src/process_guard_win32.hpp` - which processes Kill refuses or warns about
 - `src/file_read.hpp` - folder crawling
 - `src/main.cpp` - Win32 GUI + CLI
 - `src/cli_main.cpp` - portable CLI for macOS/Linux (files/folders, no process reader)

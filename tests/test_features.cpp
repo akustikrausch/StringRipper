@@ -104,6 +104,7 @@ int main(int argc, char** argv) {
         CHECK(folded[0].items[1].occurrences == 1);
         CHECK(ur::foldDuplicates(folded)[0].items[0].occurrences == 3);                       // folding twice is stable
         CHECK(ur::exportResults({g}, "csv").find("occurrences") == std::string::npos);        // exports keep every hit, format unchanged
+        CHECK(ur::plainList(folded) == "host.tld  (2)\r\n\r\nhttps://host.tld/a\r\nhttps://host.tld/b\r\n");   // editor/txt: once, no offset
     }
     auto stats = ur::summarizeResults({a, b});
     CHECK(stats.findings == 3 && stats.byGroup.at("Tickets") == 3);

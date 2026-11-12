@@ -98,6 +98,10 @@ if(NOT WIN32)
     -P "${CMAKE_SOURCE_DIR}/tests/cli_features.cmake")
 endif()
 
+if(WIN32)
+  add_executable(test_process_guard tests/test_process_guard.cpp)
+  add_test(NAME process_guard COMMAND test_process_guard)
+endif()
 # Driver test: runs the multi-threaded scan over a mock IMemoryReader (needs the
 # FXChainPlayer headers for the interface, but opens no real process). Skipped
 # where that checkout is absent (e.g. a bare macOS build box).

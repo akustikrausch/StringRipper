@@ -24,6 +24,10 @@
 #include <dbghelp.h>
 #include <dwmapi.h>
 #include <uxtheme.h>
+#include <windowsx.h>
+#include <pdh.h>
+#include <pdhmsg.h>
+#include <psapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -51,6 +55,7 @@
 #include "file_read.hpp"
 #include "scan_service.hpp"
 #include "process_scan_win32.hpp"
+#include "process_guard_win32.hpp"
 #include "session_store.hpp"
 #include "update.hpp"
 #include "audio/rip_backend.h"
@@ -62,6 +67,7 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "pdh.lib")
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -106,16 +112,6 @@ static std::string lower(std::string s) {
 }
 
 // ---------------------------------------------------------------- shared text
-
-static std::string resultsToText(const std::vector<ur::Group>& groups, ur::Mode) {
-    std::string out;
-    for (const auto& g : groups) {
-        if (!out.empty()) out += "\r\n";
-        out += g.name + "  (" + std::to_string(g.items.size()) + ")\r\n\r\n";
-        for (const auto& f : g.items) out += f.value + "\r\n";
-    }
-    return out;
-}
 
 static bool writeTextFile(const std::wstring& path, const std::string& text) {
     std::ofstream f(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
@@ -337,6 +333,7 @@ constexpr UINT WM_APP_DUMP_DONE = WM_APP + 6;      // wParam: 1 = written, lPara
 constexpr UINT_PTR TIMER_PROGRESS = 1;
 constexpr UINT_PTR TIMER_PROCS = 2;
 constexpr UINT_PTR TIMER_MONITOR = 3;
+constexpr UINT_PTR TIMER_LOAD = 4;
 constexpr ULONG_PTR kDropMagic = 0x52495050;   /* 'RIPP', dropped-path handoff */
 
 /* palette: URL Ripper design canvas tokens */
@@ -377,6 +374,15 @@ HFONT g_font = nullptr, g_fontHdr = nullptr, g_fontMono = nullptr;
 int g_dpi = 96;
 RECT g_segRect{};
 RECT g_fields[5]{};
+struct Load {
+    RECT rect{};
+    HWND tip = nullptr;
+    double cpu = -1, gpu = -1, own = 0;
+    ULONGLONG idle = 0, total = 0, mine = 0, at = 0;
+    std::atomic<double> gpuNow{-1};
+    HANDLE stop = nullptr;
+    std::thread worker;
+} g_load;
 RECT g_listCard{};
 int S(int v) { return MulDiv(v, g_dpi, 96); }
 HBRUSH g_bgBrush = nullptr, g_bg2Brush = nullptr;
@@ -486,6 +492,38 @@ void inkText(HDC dc, const wchar_t* t, RECT r, HFONT f, COLORREF c, UINT fmt, in
 void darkTitle(HWND h) {
     BOOL dark = TRUE;
     DwmSetWindowAttribute(h, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+}
+
+/* a combo's open list hangs under its rounded field (g_fields[ref]), as wide, with round corners on Win11 */
+LRESULT CALLBACK dropSub(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
+    if (msg == WM_WINDOWPOSCHANGING) {
+        auto* wpos = (WINDOWPOS*)lp;
+        if (!(wpos->flags & SWP_NOMOVE) || !(wpos->flags & SWP_NOSIZE)) {
+            RECT f = g_fields[ref], cur; MapWindowPoints(g_main, nullptr, (POINT*)&f, 2);
+            GetWindowRect(h, &cur);
+            const int cx = std::max<int>(f.right - f.left, (wpos->flags & SWP_NOSIZE) ? cur.right - cur.left : wpos->cx);
+            const int cy = (wpos->flags & SWP_NOSIZE) ? cur.bottom - cur.top : wpos->cy;
+            const int y = (wpos->flags & SWP_NOMOVE) ? cur.top : wpos->y;
+            const int gap = MulDiv(3, (int)GetDpiForWindow(g_main), 96);
+            wpos->x = f.left; wpos->cx = cx; wpos->cy = cy;
+            wpos->y = y < f.top ? f.top - cy - gap : f.bottom + gap;
+            MONITORINFO mi{sizeof(mi)};
+            if (GetMonitorInfoW(MonitorFromRect(&f, MONITOR_DEFAULTTONEAREST), &mi)) {
+                wpos->x = std::max<int>(mi.rcWork.left, std::min<int>(wpos->x, mi.rcWork.right - cx));
+                wpos->y = std::max<int>(mi.rcWork.top, std::min<int>(wpos->y, mi.rcWork.bottom - cy));
+            }
+            wpos->flags &= ~(SWP_NOMOVE | SWP_NOSIZE);
+        }
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(h, dropSub, ref);
+    return DefSubclassProc(h, msg, wp, lp);
+}
+void roundDrop(HWND combo, int field) {
+    COMBOBOXINFO ci{sizeof(ci)};
+    if (!GetComboBoxInfo(combo, &ci) || !ci.hwndList) return;
+    int round = 2;      /* DWMWCP_ROUND; Win10 ignores it */
+    DwmSetWindowAttribute(ci.hwndList, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &round, sizeof(round));
+    SetWindowSubclass(ci.hwndList, dropSub, field, field);
 }
 
 bool isMode(HWND h) { return h == g_modeUrl || h == g_modeRegex; }
@@ -658,7 +696,7 @@ enum : int {
     PE_ASCII, PE_UTF16, PE_HEX, PE_BASE64, PE_ESCAPED, PE_CUSTOM, PE_EMAIL, PE_IPV4, PE_IPV6,
     PE_GUID, PE_APIKEY, PE_FILEPATH, PE_DOWNLOAD, PE_SAMPLE, PE_TEST, PE_ADD_PROFILE,
     PE_POSITIVE, PE_NEGATIVE, PE_RUN_CASES, PE_T_PRESETS, PE_T_NAME, PE_T_DESC, PE_T_REGEX,
-    PE_T_DECODERS, PE_T_MODES, PE_STATUS, PE_T_SAMPLE, PE_T_POSITIVE, PE_T_NEGATIVE
+    PE_T_DECODERS, PE_T_MODES, PE_STATUS, PE_T_SAMPLE, PE_T_POSITIVE, PE_T_NEGATIVE, PE_UP, PE_DOWN, PE_SORT
 };
 
 HWND g_pe = nullptr, g_peList, g_peName, g_peDesc, g_peRegex, g_peStatus;
@@ -683,7 +721,8 @@ HWND peCtl(HWND p, const wchar_t* cls, const wchar_t* text, int id, DWORD style,
 
 void peFillList() {
     SendMessageW(g_peList, LB_RESETCONTENT, 0, 0);
-    for (const auto& p : g_userPresets) SendMessageW(g_peList, LB_ADDSTRING, 0, (LPARAM)widen(p.name).c_str());
+    for (std::size_t i = 0; i < g_userPresets.size(); ++i)
+        SendMessageW(g_peList, LB_ADDSTRING, 0, (LPARAM)(std::to_wstring(i + 1) + L". " + widen(g_userPresets[i].name)).c_str());
 }
 
 void peRead() {
@@ -790,6 +829,7 @@ void peLayout(HWND h, int cw, int ch) {
     const int L[][5] = {
         {PE_T_PRESETS, 14, 12, 190, 20}, {PE_LIST, 14, 34, 190, 298 + a},
         {PE_NEW, 14, 344 + a, 88, 28}, {PE_DELETE, 112, 344 + a, 92, 28},
+        {PE_UP, 14, 377 + a, 56, 26}, {PE_DOWN, 76, 377 + a, 60, 26}, {PE_SORT, 142, 377 + a, 62, 26},
         {PE_TEST, 14, 408 + a, 190, 28}, {PE_ADD_PROFILE, 14, 443 + a, 190, 28}, {PE_RUN_CASES, 14, 444 + b, 190, 28},
         {PE_T_NAME, 220, 12, w, 20}, {PE_NAME, 220, 34, w, 26},
         {PE_T_DESC, 220, 70, w, 20}, {PE_DESC, 220, 92, w, fd},
@@ -854,6 +894,9 @@ LRESULT CALLBACK PresetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         peCtl(h, L"BUTTON", L"Run saved cases", PE_RUN_CASES, BS_PUSHBUTTON);
         peCtl(h, L"BUTTON", L"New", PE_NEW, BS_PUSHBUTTON);
         peCtl(h, L"BUTTON", L"Delete", PE_DELETE, BS_PUSHBUTTON);
+        peCtl(h, L"BUTTON", L"Up", PE_UP, BS_PUSHBUTTON);
+        peCtl(h, L"BUTTON", L"Down", PE_DOWN, BS_PUSHBUTTON);
+        peCtl(h, L"BUTTON", L"Sort A-Z", PE_SORT, BS_PUSHBUTTON);
         peCtl(h, L"BUTTON", L"Check syntax", PE_VALIDATE, BS_PUSHBUTTON);
         peCtl(h, L"BUTTON", L"Save all", PE_SAVE, BS_PUSHBUTTON);
         peCtl(h, L"BUTTON", L"Use preset", PE_USE, BS_DEFPUSHBUTTON);
@@ -881,6 +924,21 @@ LRESULT CALLBACK PresetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 SetWindowTextW(g_peStatus, L"No preset selected. Click New to create one.");
             }
             return 0;
+        }
+        if ((LOWORD(wp) == PE_UP || LOWORD(wp) == PE_DOWN) && g_peIndex >= 0) {
+            const int to = g_peIndex + (LOWORD(wp) == PE_UP ? -1 : 1);
+            if (to < 0 || to >= (int)g_userPresets.size()) return 0;
+            peRead(); std::swap(g_userPresets[g_peIndex], g_userPresets[to]);
+            peFillList(); peShow(to); return 0;
+        }
+        if (LOWORD(wp) == PE_SORT && !g_userPresets.empty()) {
+            peRead();
+            const std::string cur = g_peIndex >= 0 ? g_userPresets[g_peIndex].name : std::string{};
+            std::stable_sort(g_userPresets.begin(), g_userPresets.end(),
+                [](const ur::UserPreset& x, const ur::UserPreset& y) { return _stricmp(x.name.c_str(), y.name.c_str()) < 0; });
+            int at = 0;
+            for (int i = 0; i < (int)g_userPresets.size(); ++i) if (g_userPresets[i].name == cur) at = i;
+            peFillList(); peShow(at); return 0;
         }
         if (LOWORD(wp) == PE_VALIDATE) { peValidate(true); return 0; }
         if (LOWORD(wp) == PE_TEST) {
@@ -1074,13 +1132,56 @@ void refreshProcesses() {
     applyProcFilter();
 }
 
-/* poll: refresh the combo when the process set changes, and drop results whose
-   process has exited. skipped while scanning or with the dropdown open. */
+/* poll: drop results whose process has exited. the full process list is costly (handles,
+   audio sessions), so it is rebuilt only when pids changed and the list is about to be seen */
+std::unordered_set<uint32_t> livePids() {
+    std::vector<DWORD> ids(1024);
+    DWORD got = 0;
+    while (EnumProcesses(ids.data(), DWORD(ids.size() * sizeof(DWORD)), &got) && got == ids.size() * sizeof(DWORD))
+        ids.resize(ids.size() * 2);
+    return std::unordered_set<uint32_t>(ids.begin(), ids.begin() + got / sizeof(DWORD));
+}
+std::unordered_set<uint32_t> g_livePids;
+struct ResultSlot {
+    std::vector<ur::Group> last, fresh, previous;
+    ur::ScanComparison comparison;
+    ur::SessionDelta delta;
+    std::string context;
+    bool hasComparison = false;
+    std::wstring status = L"Ready.", filter;
+    uint32_t pid = 0;
+    std::vector<uint32_t> pids;
+} g_otherSlot;
+bool g_procsStale = false;
+/* rebuild the process list if pids changed since the last rebuild */
+void syncProcs() {
+    if (!g_procsStale) return;
+    g_procsStale = false;
+    auto now = fxchain::ripBackend().enumerate();
+    std::unordered_set<uint32_t> before, listed;
+    for (const auto& p : g_procsAll) before.insert(p.pid);
+    for (const auto& p : now) listed.insert(p.pid);
+    if (before == listed) return;
+    uint32_t keep = selectedPid();
+    g_procsAll = std::move(now);
+    sortProcs();
+    applyProcFilter();
+    if (keep) selectPid(keep);
+}
 void autoRefreshProcs() {
     if (g_scanning) return;
-    auto now = fxchain::ripBackend().enumerate();
-    std::unordered_set<uint32_t> after;
-    for (const auto& p : now) after.insert(p.pid);
+    std::unordered_set<uint32_t> after = livePids();
+    if (after.empty()) return;
+    auto gone = [&](uint32_t p) { return !after.count(p); };
+    if ((g_otherSlot.pid && gone(g_otherSlot.pid)) ||
+        (!g_otherSlot.pids.empty() && std::all_of(g_otherSlot.pids.begin(), g_otherSlot.pids.end(), gone))) {
+        std::wstring f = std::move(g_otherSlot.filter);
+        g_otherSlot = ResultSlot{};
+        g_otherSlot.filter = std::move(f);
+        g_otherSlot.status = L"The scanned process exited; results cleared.";
+    }
+    if (after == g_livePids) return;
+    g_livePids = after;
     if (!g_resultsPids.empty()) {
         g_resultsPids.erase(std::remove_if(g_resultsPids.begin(), g_resultsPids.end(),
                                            [&](uint32_t p) { return !after.count(p); }), g_resultsPids.end());
@@ -1095,15 +1196,9 @@ void autoRefreshProcs() {
         g_statusFull = L"The scanned process exited; results cleared.";
         SetWindowTextW(g_status, g_statusFull.c_str());
     }
-    std::unordered_set<uint32_t> before;
-    for (const auto& p : g_procsAll) before.insert(p.pid);
-    if (before == after) return;
-    if (SendMessageW(g_source, CB_GETDROPPEDSTATE, 0, 0)) return;
-    uint32_t keep = selectedPid();
-    g_procsAll = std::move(now);
-    sortProcs();
-    applyProcFilter();
-    if (keep) selectPid(keep);
+    g_procsStale = true;
+    const uint32_t sel = selectedPid();     /* the rest waits for the dropdown or the search box */
+    if (sel && !after.count(sel) && !SendMessageW(g_source, CB_GETDROPPEDSTATE, 0, 0)) syncProcs();
 }
 
 void pickFile() {
@@ -1142,8 +1237,28 @@ void onDrop(HDROP drop) {
 }
 
 /*--- group headers ---*/
+int g_pillHot = -1;
+int pillAt(POINT pt);
+void copyGroup(int group);
 LRESULT CALLBACK resultsSub(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR) {
     if (msg == WM_DROPFILES) { onDrop((HDROP)wp); return 0; }
+    if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK) {
+        const int row = pillAt({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+        if (row >= 0) { copyGroup(g_rows[row].group); return 0; }
+    }
+    if (msg == WM_MOUSEMOVE) {
+        const int row = pillAt({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+        if (row != g_pillHot) {
+            const int old = g_pillHot; g_pillHot = row;
+            for (int r : {old, row}) if (r >= 0 && r < (int)g_rows.size()) ListView_RedrawItems(h, r, r);
+        }
+        if (row >= 0) { TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0}; TrackMouseEvent(&t); }
+    }
+    if (msg == WM_MOUSELEAVE && g_pillHot >= 0) {
+        const int old = g_pillHot; g_pillHot = -1;
+        if (old < (int)g_rows.size()) ListView_RedrawItems(h, old, old);
+    }
+    if (msg == WM_SETCURSOR && g_pillHot >= 0 && LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursor(nullptr, IDC_HAND)); return TRUE; }
     if (msg == WM_NOTIFY) {
         auto* cd = (NMCUSTOMDRAW*)lp;
         if (cd->hdr.code == NM_CUSTOMDRAW && cd->hdr.hwndFrom == ListView_GetHeader(h)) {
@@ -1249,6 +1364,7 @@ void enableResultActions(bool on) {
 int g_srcWant = 0;   /* widest source shown, so region labels stay readable */
 void populateResults(const std::vector<ur::Group>& groups) {
     g_rows.clear();
+    g_pillHot = -1;
     for (int gi = 0; gi < (int)groups.size(); ++gi) {
         g_rows.push_back({gi, -1});
         for (int i = 0; i < (int)groups[gi].items.size(); ++i) g_rows.push_back({gi, i});
@@ -1379,17 +1495,8 @@ void onDone(std::vector<ur::Group>* groups) {
     }
 }
 
-/* URL and regex mode keep their own last results; the inactive mode's wait here */
-struct ResultSlot {
-    std::vector<ur::Group> last, fresh, previous;
-    ur::ScanComparison comparison;
-    ur::SessionDelta delta;
-    std::string context;
-    bool hasComparison = false;
-    std::wstring status = L"Ready.";
-    uint32_t pid = 0;
-    std::vector<uint32_t> pids;
-} g_otherSlot;
+/* URL and regex mode keep their own last results and filter; the inactive mode's wait here */
+bool g_filterQuiet = false;
 void switchMode(bool regex) {
     if (isChecked(g_modeRegex) != regex && !g_scanning) {
         KillTimer(g_main, TIMER_MONITOR); setChecked(g_monitor, false);
@@ -1398,6 +1505,9 @@ void switchMode(bool regex) {
         std::swap(g_liveDelta, g_otherSlot.delta); std::swap(g_scanContext, g_otherSlot.context);
         std::swap(g_hasComparison, g_otherSlot.hasComparison); std::swap(g_statusFull, g_otherSlot.status);
         std::swap(g_resultsPid, g_otherSlot.pid); std::swap(g_resultsPids, g_otherSlot.pids);
+        std::wstring mine = controlText(g_filter);
+        g_filterQuiet = true; SetWindowTextW(g_filter, g_otherSlot.filter.c_str()); g_filterQuiet = false;
+        g_otherSlot.filter = std::move(mine);
         setChecked(g_modeUrl, !regex); setChecked(g_modeRegex, regex);
         g_lastMode = regex ? ur::Mode::Regex : ur::Mode::Urls;
         setChecked(g_newOnly, false); EnableWindow(g_newOnly, g_hasComparison);
@@ -2050,6 +2160,23 @@ std::wstring rowText(int row, int col) {
     }
     }
 }
+/* a header row: name, count chip, Copy all pill; false when the pill does not fit */
+bool headerParts(HWND lv, HDC dc, int row, RECT& chip, RECT& pill) {
+    RECT rr{}; ListView_GetItemRect(lv, row, &rr, LVIR_BOUNDS);
+    const auto& g = g_viewResults[g_rows[row].group];
+    HFONT of = (HFONT)SelectObject(dc, g_fontMono);
+    std::wstring t = widen(g.name), cnt = std::to_wstring(g.items.size());
+    SIZE sz{}; GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &sz);
+    SelectObject(dc, g_font);
+    SIZE cs{}, ps{}; GetTextExtentPoint32W(dc, cnt.c_str(), (int)cnt.size(), &cs);
+    GetTextExtentPoint32W(dc, L"Copy all", 8, &ps);
+    SelectObject(dc, of);
+    const int ch = S(18), top = (rr.top + rr.bottom - ch) / 2;
+    chip = { rr.left + S(12) + sz.cx + S(10), top, 0, top + ch };
+    chip.right = chip.left + cs.cx + S(14);
+    pill = { chip.right + S(6), top, chip.right + S(6) + ps.cx + S(18), top + ch };
+    return pill.right < rr.right - S(8);
+}
 void drawResultRow(HWND lv, HDC dc, int row) {
     if (row < 0 || row >= (int)g_rows.size()) return;
     static HBRUSH selBrush = CreateSolidBrush(kSel), cardBrush = CreateSolidBrush(kCard);
@@ -2070,13 +2197,17 @@ void drawResultRow(HWND lv, HDC dc, int row) {
         DrawTextW(dc, t.c_str(), -1, &tr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
         std::wstring cnt = std::to_wstring(g.items.size());
         SelectObject(dc, g_font);
-        SIZE cs{}; GetTextExtentPoint32W(dc, cnt.c_str(), (int)cnt.size(), &cs);
         const int ch = S(18);
-        RECT chip{ tr.left + sz.cx + S(10), (rr.top + rr.bottom - ch) / 2, 0, 0 };
-        chip.right = chip.left + cs.cx + S(14); chip.bottom = chip.top + ch;
+        RECT chip, pill;
+        const bool fits = headerParts(lv, dc, row, chip, pill);
         if (chip.right < rr.right - S(8)) {
             roundRect(dc, chip, ch, kBg, kBDef);
             inkText(dc, cnt.c_str(), chip, g_font, kText2, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        }
+        if (fits) {
+            const bool hot = g_pillHot == row;
+            roundRect(dc, pill, ch, hot ? kBg3 : kBg2, hot ? kBDef : kBSub);
+            inkText(dc, L"Copy all", pill, g_font, hot ? kText : kText2, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
         }
         SelectObject(dc, of);
         return;
@@ -2114,6 +2245,18 @@ void drawResultRow(HWND lv, HDC dc, int row) {
         DrawTextW(dc, t.c_str(), -1, &cr, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
     SelectObject(dc, of);
+}
+
+/* the header row whose Copy all pill is under pt (list client coords), or -1 */
+int pillAt(POINT pt) {
+    LVHITTESTINFO hi{}; hi.pt = pt;
+    const int row = ListView_HitTest(g_results, &hi);
+    if (row < 0 || row >= (int)g_rows.size() || g_rows[row].item >= 0) return -1;
+    HDC dc = GetDC(g_results);
+    RECT chip, pill;
+    const bool fits = headerParts(g_results, dc, row, chip, pill);
+    ReleaseDC(g_results, dc);
+    return fits && PtInRect(&pill, pt) ? row : -1;
 }
 
 /* drag a row out: the value, or the group name from a header row */
@@ -2485,6 +2628,30 @@ void showFindingMenu(ur::Finding f) {
     else if (chosen == 7) showIgnoreEditor();
 }
 
+bool putClipboard(const std::string& text) {
+    if (text.empty() || !OpenClipboard(g_main)) return false;
+    EmptyClipboard();
+    std::wstring w = widen(text);
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (w.size() + 1) * sizeof(wchar_t));
+    bool ok = false;
+    if (void* mem = h ? GlobalLock(h) : nullptr) {
+        memcpy(mem, w.c_str(), (w.size() + 1) * sizeof(wchar_t));
+        GlobalUnlock(h);
+        ok = SetClipboardData(CF_UNICODETEXT, h) != nullptr;
+    }
+    if (h && !ok) GlobalFree(h);
+    CloseClipboard();
+    return ok;
+}
+/* every value the list shows in one group, once each, in list order */
+void copyGroup(int group) {
+    if (group < 0 || group >= (int)g_viewResults.size()) return;
+    const auto& g = g_viewResults[group];
+    std::string text;
+    for (const auto& f : g.items) { text += f.value; text += "\r\n"; }
+    if (putClipboard(text))
+        SetWindowTextW(g_status, (L"Copied " + std::to_wstring(g.items.size()) + L" values of " + widen(g.name)).c_str());
+}
 void copySelected() {
     std::string text;
     int i = -1;
@@ -2494,17 +2661,7 @@ void copySelected() {
         text += f->value;
         text += "\r\n";
     }
-    if (text.empty()) return;
-    if (!OpenClipboard(g_main)) return;
-    EmptyClipboard();
-    std::wstring w = widen(text);
-    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (w.size() + 1) * sizeof(wchar_t));
-    if (h) {
-        memcpy(GlobalLock(h), w.c_str(), (w.size() + 1) * sizeof(wchar_t));
-        GlobalUnlock(h);
-        SetClipboardData(CF_UNICODETEXT, h);
-    }
-    CloseClipboard();
+    putClipboard(text);
 }
 
 void saveAsTxt() {
@@ -2539,7 +2696,7 @@ void saveAsTxt() {
         if (std::filesystem::exists(path, ec) &&
             MessageBoxW(g_main, L"Replace the existing export file?", L"Export results",
                         MB_YESNO | MB_ICONQUESTION) != IDYES) return;
-        if (!writeTextFile(path.wstring(), ur::exportResults(g_viewHits, format)))
+        if (!writeTextFile(path.wstring(), format == "txt" ? ur::plainList(g_viewResults) : ur::exportResults(g_viewHits, format)))
             MessageBoxW(g_main, L"Could not write the file.", L"StringRipper", MB_ICONERROR);
     }
 }
@@ -2549,7 +2706,7 @@ void sendToEditor() {
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
     std::wstring p = std::wstring(tmp) + L"StringRipper-" + std::to_wstring(GetTickCount64()) + L".txt";
-    if (!writeTextFile(p, resultsToText(g_viewHits, g_lastMode))) {
+    if (!writeTextFile(p, ur::plainList(g_viewResults))) {
         MessageBoxW(g_main, L"Could not write the temp file.", L"StringRipper", MB_ICONERROR);
         return;
     }
@@ -2652,9 +2809,16 @@ void layout(int cw, int ch) {
     MoveWindow(g_results, m + S(7), y + S(7), cw - m * 2 - S(14), listH - S(14), TRUE);
     fitColumns();
 
-    flow({g_copy, g_save, g_editor, g_clear}, m, bottom, S(26));
+    const int left = flow({g_copy, g_save, g_editor, g_clear}, m, bottom, S(26));
     int aw = textW(g_about, g_font) + S(26);
     MoveWindow(g_about, right - aw, bottom, aw, rh, TRUE);
+    g_load.rect = { right - aw - S(16) - S(250), bottom, right - aw - S(16), bottom + rh };
+    if (g_load.rect.left < left + S(8)) g_load.rect = {};
+    if (g_load.tip) {
+        TTTOOLINFOW ti{sizeof(ti)}; ti.hwnd = g_main; ti.uId = 1; ti.rect = g_load.rect;
+        SendMessageW(g_load.tip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+    }
+    InvalidateRect(g_main, nullptr, FALSE);
 
 }
 
@@ -2830,24 +2994,134 @@ void dumpSelected() {
         PostMessageW(g_main, WM_APP_DUMP_DONE, ok ? 1 : 0, (LPARAM)err);
     });
 }
+/* load meter: whole-system CPU from the system times, GPU = busiest engine type over all processes */
+ULONGLONG ft64(const FILETIME& f) { return (ULONGLONG(f.dwHighDateTime) << 32) | f.dwLowDateTime; }
+void sampleLoad() {
+    FILETIME i, k, u, c, e, pk, pu;
+    if (GetSystemTimes(&i, &k, &u)) {
+        const ULONGLONG idle = ft64(i), total = ft64(k) + ft64(u);
+        if (g_load.total && total > g_load.total)
+            g_load.cpu = 100.0 * (1.0 - double(idle - g_load.idle) / double(total - g_load.total));
+        g_load.idle = idle; g_load.total = total;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (GetProcessTimes(GetCurrentProcess(), &c, &e, &pk, &pu)) {
+        const ULONGLONG mine = ft64(pk) + ft64(pu);
+        static const unsigned cpus = std::max(1u, std::thread::hardware_concurrency());
+        if (g_load.at && now > g_load.at)
+            g_load.own = double(mine - g_load.mine) / 100.0 / double(now - g_load.at) / cpus;   /* 100 ns ticks vs ms */
+        g_load.mine = mine; g_load.at = now;
+    }
+    g_load.gpu = g_load.gpuNow;
+}
+/* GPU like Task Manager: sum each engine over all processes, show the busiest engine. Own thread, PDH can be slow */
+void gpuLoop() {
+    PDH_HQUERY q = nullptr; PDH_HCOUNTER c = nullptr;
+    if (PdhOpenQueryW(nullptr, 0, &q) != ERROR_SUCCESS) return;
+    if (PdhAddEnglishCounterW(q, L"\\GPU Engine(*)\\Utilization Percentage", 0, &c) != ERROR_SUCCESS) { PdhCloseQuery(q); return; }
+    PdhCollectQueryData(q);
+    std::vector<BYTE> buf;
+    std::vector<std::pair<std::wstring, double>> perEngine;
+    while (WaitForSingleObject(g_load.stop, 1000) == WAIT_TIMEOUT) {
+        if (IsIconic(g_main) || PdhCollectQueryData(q) != ERROR_SUCCESS) continue;
+        DWORD size = 0, count = 0;
+        PDH_STATUS st = PDH_MORE_DATA;
+        while (st == PDH_MORE_DATA) {
+            st = PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &size, &count, nullptr);
+            if (st != PDH_MORE_DATA) break;
+            buf.resize(size);
+            st = PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, &size, &count, (PDH_FMT_COUNTERVALUE_ITEM_W*)buf.data());
+        }
+        if (st != ERROR_SUCCESS) { if (st == PDH_NO_DATA || st == PDH_CSTATUS_NO_INSTANCE) g_load.gpuNow = 0; continue; }
+        auto* items = (PDH_FMT_COUNTERVALUE_ITEM_W*)buf.data();
+        perEngine.clear();
+        for (DWORD n = 0; n < count; ++n) {
+            if (items[n].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA && items[n].FmtValue.CStatus != PDH_CSTATUS_NEW_DATA) continue;
+            const wchar_t* k = wcsstr(items[n].szName, L"luid_");     /* pid_N_luid_X_Y_phys_P_eng_E_engtype_T */
+            std::wstring key = k ? k : items[n].szName;
+            auto it = std::find_if(perEngine.begin(), perEngine.end(), [&](auto& p) { return p.first == key; });
+            if (it == perEngine.end()) perEngine.emplace_back(std::move(key), items[n].FmtValue.doubleValue);
+            else it->second += items[n].FmtValue.doubleValue;
+        }
+        double best = 0;
+        for (auto& p : perEngine) best = std::max(best, p.second);
+        g_load.gpuNow = std::min(100.0, best);
+    }
+    PdhCloseQuery(q);
+}
+void startLoad(HWND hwnd) {
+    g_load.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (g_load.stop) g_load.worker = std::thread(gpuLoop);
+    sampleLoad();
+    g_load.tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                                 0, 0, 0, 0, hwnd, nullptr, nullptr, nullptr);
+    TTTOOLINFOW ti{sizeof(ti)};
+    ti.uFlags = TTF_SUBCLASS; ti.hwnd = hwnd; ti.uId = 1; ti.lpszText = LPSTR_TEXTCALLBACKW;
+    SendMessageW(g_load.tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+    SetTimer(hwnd, TIMER_LOAD, 1000, nullptr);
+}
+std::wstring loadTip() {
+    wchar_t t[160];
+    _snwprintf_s(t, _TRUNCATE, L"Whole system, refreshed every second.\r\nStringRipper itself: %.1f%% CPU%s",
+                 g_load.own, g_load.gpu < 0 ? L"\r\nNo GPU counters on this system." : L"");
+    return t;
+}
+void drawLoad(HDC dc) {
+    if (IsRectEmpty(&g_load.rect)) return;
+    HFONT of = (HFONT)SelectObject(dc, g_font);
+    SetBkMode(dc, TRANSPARENT);
+    const int barW = S(34), barH = S(4);
+    SIZE ls{}, vs{}; GetTextExtentPoint32W(dc, L"GPU", 3, &ls); GetTextExtentPoint32W(dc, L"100%", 4, &vs);
+    const int part = ls.cx + S(6) + barW + S(6) + vs.cx;
+    int x = g_load.rect.right - part;
+    const int mid = (g_load.rect.top + g_load.rect.bottom) / 2;
+    auto one = [&](const wchar_t* name, double v) {
+        RECT r{ x, g_load.rect.top, x + ls.cx, g_load.rect.bottom };
+        inkText(dc, name, r, g_font, kText3, DT_SINGLELINE | DT_VCENTER);
+        RECT bar{ r.right + S(6), mid - barH / 2, r.right + S(6) + barW, mid - barH / 2 + barH };
+        roundRect(dc, bar, barH, kBg3, kBg3);
+        if (v > 0.5) {
+            RECT fill = bar; fill.right = bar.left + std::max(barH, int(barW * std::min(v, 100.0) / 100.0));
+            roundRect(dc, fill, barH, kAccent, kAccent);
+        }
+        wchar_t t[16]; _snwprintf_s(t, _TRUNCATE, L"%d%%", int(v + 0.5));
+        RECT vr{ bar.right + S(6), g_load.rect.top, bar.right + S(6) + vs.cx, g_load.rect.bottom };
+        inkText(dc, v < 0 ? L"-" : t, vr, g_font, kText2, DT_SINGLELINE | DT_VCENTER | DT_RIGHT);
+        x -= part + S(14);
+    };
+    if (g_load.gpu >= 0) one(L"GPU", g_load.gpu);
+    one(L"CPU", g_load.cpu);
+    SelectObject(dc, of);
+}
+
 void killSelected() {
     const uint32_t pid = selectedPid();
     if (!pid) { MessageBoxW(g_main, L"Choose a process first.", L"Kill", MB_ICONINFORMATION); return; }
     if (pid == GetCurrentProcessId()) { MessageBoxW(g_main, L"That is StringRipper itself.", L"Kill", MB_ICONINFORMATION); return; }
     std::wstring name = widen(fxchain::ripBackend().processName(pid));
+    /* one handle from the check to the kill, so a reused pid can't slip in while the dialogs are open */
+    HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    const DWORD openErr = h ? 0 : GetLastError();
+    const int level = ur::systemProcessLevel(pid, name, h);
+    struct Closer { HANDLE& h; ~Closer() { if (h) CloseHandle(h); } } closer{h};
+    if (level == 2) {
+        MessageBoxW(g_main, (name + L" (pid " + std::to_wstring(pid) + L") is a Windows system process.\r\n\r\n"
+            L"Ending it would crash or shut down Windows, so StringRipper does not do that.").c_str(), L"Kill process", MB_ICONSTOP);
+        return;
+    }
     std::wstring ask = L"End " + name + L" (pid " + std::to_wstring(pid) + L")?\r\n\r\nUnsaved work in that program is lost.";
     if (MessageBoxW(g_main, ask.c_str(), L"Kill process", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
-    HANDLE h = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+    if (level == 1 && MessageBoxW(g_main, (name + L" belongs to Windows or runs as a service.\r\n\r\n"
+            L"Ending it can make Windows unstable, freeze the desktop or log you off. End it anyway?").c_str(),
+            L"Kill system process", MB_YESNO | MB_ICONSTOP | MB_DEFBUTTON2) != IDYES) return;
     if (!h || !TerminateProcess(h, 1)) {
-        const DWORD err = GetLastError();
-        if (h) CloseHandle(h);
+        const DWORD err = h ? GetLastError() : openErr;
         std::wstring why = L"Could not end " + name + L" (error " + std::to_wstring(err) + L").";
         if (err == ERROR_ACCESS_DENIED && !g_elevated) why += L"\r\n\r\nIt runs with higher rights: start StringRipper as administrator.";
         MessageBoxW(g_main, why.c_str(), L"Kill process", MB_ICONWARNING);
         return;
     }
     WaitForSingleObject(h, 3000);
-    CloseHandle(h);
     autoRefreshProcs();
     SetWindowTextW(g_status, (L"Ended " + name + L" (pid " + std::to_wstring(pid) + L").").c_str());
 }
@@ -2906,6 +3180,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             0, 0, 0, 0, hwnd, (HMENU)ID_PRESET_PICK, nullptr, nullptr);
         SetWindowTheme(g_presetPick, L"DarkMode_CFD", nullptr);
         SendMessageW(g_presetPick, WM_SETFONT, (WPARAM)g_font, FALSE);
+        roundDrop(g_presetPick, 4); roundDrop(g_source, 1);
 
         g_secDecode = mkSection(hwnd, L"DECODE");
         g_ascii = mkChip(hwnd, L"ASCII", ID_ENC_ASCII);
@@ -3005,6 +3280,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         fillPresetPick();
         RegisterDragDrop(g_filter, &g_filterDrop);
         SetTimer(hwnd, TIMER_PROCS, 2000, nullptr);
+        startLoad(hwnd);
         if (g_autoRipPid) {
             selectPid(g_autoRipPid);
             PostMessageW(hwnd, WM_COMMAND, ID_SCAN, 0);
@@ -3031,6 +3307,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             SetWindowTextW(g_status, s);
         } else if (wp == TIMER_PROCS) {
             autoRefreshProcs();
+        } else if (wp == TIMER_LOAD) {
+            if (IsIconic(hwnd)) return 0;
+            sampleLoad();
+            if (!IsRectEmpty(&g_load.rect)) InvalidateRect(hwnd, &g_load.rect, TRUE);
         } else if (wp == TIMER_MONITOR) {
             KillTimer(hwnd, TIMER_MONITOR);
             if (isChecked(g_monitor) && !g_scanning) doScan();
@@ -3094,6 +3374,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             roundRect(dc, g_fields[i], S(20), kBg2, kBSub);
         }
         roundRect(dc, g_listCard, S(26), kCard, kBSub);
+        drawLoad(dc);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -3104,8 +3385,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_COMMAND:
         switch (LOWORD(wp)) {
-        case ID_SEARCH: if (HIWORD(wp) == EN_CHANGE) applyProcFilter(); break;
-        case ID_FILTER: if (HIWORD(wp) == EN_CHANGE) applyResultFilter(false); break;
+        case ID_SEARCH: if (HIWORD(wp) == EN_CHANGE) { if (g_procsStale) syncProcs(); applyProcFilter(); } break;
+        case ID_FILTER: if (HIWORD(wp) == EN_CHANGE && !g_filterQuiet) applyResultFilter(false); break;
         case ID_REFRESH: refreshProcesses(); break;
         case ID_FILE: pickFile(); break;
         case ID_SCAN_SETTINGS: showScanSettings(); break;
@@ -3155,6 +3436,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
         case ID_SOURCE:
+            if (HIWORD(wp) == CBN_DROPDOWN) syncProcs();
             if (HIWORD(wp) == CBN_SELCHANGE) {
                 g_chosenPaths.clear();
                 int sel = (int)SendMessageW(g_source, CB_GETCURSEL, 0, 0);
@@ -3183,6 +3465,28 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_NOTIFY: {
         auto* hdr = (NMHDR*)lp;
+        if (hdr->hwndFrom == g_load.tip && hdr->code == TTN_GETDISPINFOW) {
+            static std::wstring tip; tip = loadTip();
+            SendMessageW(g_load.tip, TTM_SETMAXTIPWIDTH, 0, S(360));
+            ((NMTTDISPINFOW*)lp)->lpszText = (LPWSTR)tip.c_str();
+            return 0;
+        }
+        if (hdr->idFrom == ID_RESULTS && hdr->code == NM_RCLICK) {
+            const int row = ((NMITEMACTIVATE*)lp)->iItem;
+            if (row >= 0 && row < (int)g_rows.size() && g_rows[row].item < 0) {
+                const int group = g_rows[row].group;
+                HMENU menu = CreatePopupMenu();
+                AppendMenuW(menu, MF_STRING, 1, (L"Copy all (" + std::to_wstring(g_viewResults[group].items.size()) + L")").c_str());
+                POINT p; GetCursorPos(&p);
+                const std::string host = g_viewResults[group].name;
+                const int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, g_main, nullptr);
+                DestroyMenu(menu);
+                if (chosen == 1)        /* a live rescan may have moved the groups while the menu was open */
+                    for (int i = 0; i < (int)g_viewResults.size(); ++i)
+                        if (g_viewResults[i].name == host) { copyGroup(i); break; }
+                return 0;
+            }
+        }
         if (hdr->idFrom == ID_RESULTS && (hdr->code == NM_DBLCLK || hdr->code == NM_RCLICK)) {
             auto* action = (NMITEMACTIVATE*)lp;
             if (const auto* f = findingAtRow(action->iItem)) {
@@ -3311,6 +3615,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         KillTimer(hwnd, TIMER_PROGRESS);
         KillTimer(hwnd, TIMER_PROCS);
         KillTimer(hwnd, TIMER_MONITOR);
+        KillTimer(hwnd, TIMER_LOAD);
+        if (g_load.worker.joinable()) { SetEvent(g_load.stop); g_load.worker.join(); }
         PostQuitMessage(0);
         return 0;
     }

@@ -48,6 +48,17 @@ inline std::string csvField(const std::string& s) {
     return out + '"';
 }
 
+/* the list as shown: group with its row count, each value once, no offsets */
+inline std::string plainList(const std::vector<Group>& groups) {
+    std::string out;
+    for (const auto& g : groups) {
+        if (!out.empty()) out += "\r\n";
+        out += g.name + "  (" + std::to_string(g.items.size()) + ")\r\n\r\n";
+        for (const auto& f : g.items) out += f.value + "\r\n";
+    }
+    return out;
+}
+
 inline std::string exportResults(const std::vector<Group>& groups, const std::string& format) {
     if (format != "txt" && format != "csv" && format != "json")
         throw std::invalid_argument("format must be txt, csv or json");
